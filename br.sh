@@ -1,23 +1,37 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
-# trap for CTRL-C (SIGINT) to clear partial input and re-prompt cleanly
-trap '
-    user_message_content=""
-    echo " [IGNORE THIS MESSAGE]"
-    echo -n "User: "
-    # Continue to next read
-' SIGINT
+set -o emacs
 
+# make CTRL-C arrive as a normal character to readline (so our binding can handle it)
+# we re-apply this before every read because readline restores terminal modes after each input
+apply_tty_settings() {
+    stty -echoctl -isig intr undef
+}
+
+apply_tty_settings
+
+# never die on SIGINT (belt + suspenders)
+trap '' SIGINT
+
+# restore terminal when on finally exit
+trap 'stty sane; stty "$OLD_STTY" 2>/dev/null || true' EXIT
+
+OLD_STTY=$(stty -g)
+
+bind '"\C-c": kill-whole-line'
 
 while true; do
-    echo -n "User: "
+    apply_tty_settings
+    read -r -e -p "User: " user_message_content
+    status=$?
 
-    # read user input
-    if read -r user_message_content; then
-        # read succeeds, ENTER pressed
-        echo "Assistant: $user_message_content"
-    else
-        # read failed, likely CTRL-D (EOF)
-        break
+    if [ "$status" -ne 0 ]; then
+        exit 0
     fi
+
+    if [ -z "$user_message_content" ]; then
+        continue
+    fi
+
+    echo "Assistant: $user_message_content"
 done
