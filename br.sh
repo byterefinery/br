@@ -455,6 +455,7 @@ execute_tool() {
 oai_make_request() {
     local user_message="$1"
 
+    # Append user message to conversation history
     local user_msg_json
     user_msg_json=$(jq -n --arg content "$user_message" '{role: "user", content: $content}')
     CONVERSATION+=("$user_msg_json")
@@ -463,11 +464,13 @@ oai_make_request() {
     tools_json=$(get_tools_json)
 
     while true; do
+        # Build messages array from history
         local messages_json="[]"
         for msg in "${CONVERSATION[@]}"; do
             messages_json=$(echo "$messages_json" | jq --argjson msg "$msg" '. + [$msg]')
         done
 
+        # Construct API request body
         local request_body
         request_body=$(jq -n \
             --arg model "$BR_MODEL_NAME" \
@@ -476,6 +479,7 @@ oai_make_request() {
             --argjson tools "$tools_json" \
             '{model: $model, messages: $messages, stream: $stream, tools: $tools}')
 
+        # Prepare HTTP headers
         local curl_args=()
         curl_args+=("-H" "Content-Type: application/json")
         curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
@@ -486,6 +490,7 @@ oai_make_request() {
 
         local request_successful=false
 
+        # Retry loop for communication failures
         while [[ "$request_successful" == "false" ]]; do
             local reasoning_content=""
             local reasoning_started=false
@@ -498,6 +503,7 @@ oai_make_request() {
             local err_detail=""
 
             if [[ "$BR_MODEL_STREAM" == "true" ]]; then
+                # Streaming Mode
                 local exit_code_file=$(mktemp)
                 while IFS= read -r line; do
                     [[ -z "$line" ]] && continue
@@ -506,6 +512,7 @@ oai_make_request() {
                     if [[ "$line" =~ ^data:\ (.+)$ ]]; then
                         local json_data="${BASH_REMATCH[1]}"
 
+                        # Check for API error
                         local err_msg
                         err_msg=$(echo "$json_data" | jq -r '.error.message // empty')
                         if [[ -n "$err_msg" ]]; then
@@ -513,6 +520,7 @@ oai_make_request() {
                             break
                         fi
 
+                        # Process reasoning content
                         local reasoning_delta
                         reasoning_delta=$(echo "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty'; printf x)
                         reasoning_delta="${reasoning_delta%x}"
@@ -525,6 +533,7 @@ oai_make_request() {
                             reasoning_content+="$reasoning_delta"
                         fi
 
+                        # Process response content
                         local content
                         content=$(echo "$json_data" | jq -j '.choices[0].delta.content // empty'; printf x)
                         content="${content%x}"
@@ -532,7 +541,7 @@ oai_make_request() {
                             if [[ "$reasoning_started" == "true" ]]; then
                                 printf "[/THINK]%s\n\n" "${COLOR_RESET}"
                                 reasoning_started=false
-                                # Strip leading newlines from content to avoid excessive blank lines
+                                # Strip leading newlines to avoid excessive blank lines
                                 while [[ "$content" =~ ^$'\n' ]]; do
                                     content="${content:1}"
                                 done
@@ -543,6 +552,7 @@ oai_make_request() {
                             fi
                         fi
 
+                        # Process tool calls (accumulate fragments by index)
                         local tc_count
                         tc_count=$(echo "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length')
                         if [[ "$tc_count" -gt 0 ]]; then
@@ -589,6 +599,7 @@ oai_make_request() {
                 rm -f "$exit_code_file"
 
             else
+                # Non-Streaming Mode
                 local response_file=$(mktemp)
                 curl -s -w "\n%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$response_file"
                 curl_exit_code=$?
@@ -630,6 +641,7 @@ oai_make_request() {
                 fi
             fi
 
+            # Determine if we should retry based on curl exit code and HTTP status
             local should_retry=false
             if [[ $curl_exit_code -ne 0 ]]; then
                 should_retry=true
@@ -647,6 +659,7 @@ oai_make_request() {
                 fi
             fi
 
+            # Execute retry wait if needed
             if [[ "$should_retry" == "true" ]]; then
                 if [[ $GLOBAL_RETRY_COUNT -gt $BR_RETRIES ]]; then
                     echo -e "\n[Max retries ($BR_RETRIES) reached. Aborting request.]"
@@ -658,6 +671,7 @@ oai_make_request() {
 
                 sleep "$GLOBAL_RETRY_DELAY"
 
+                # Exponential backoff
                 GLOBAL_RETRY_DELAY=$((GLOBAL_RETRY_DELAY * 2))
                 if [[ $GLOBAL_RETRY_DELAY -gt 128 ]]; then
                     GLOBAL_RETRY_DELAY=2
@@ -666,20 +680,24 @@ oai_make_request() {
                 continue
             fi
 
+            # Abort on fatal client error
             if [[ "$should_retry" == "false" && -n "$api_error" ]]; then
                 echo -e "\nAPI Error: $api_error"
                 return 1
             fi
 
+            # Reset retry state on success
             request_successful=true
             GLOBAL_RETRY_COUNT=1
             GLOBAL_RETRY_DELAY=2
         done
 
+        # Close reasoning tag if stream ended while still in THINK block
         if [[ "$reasoning_started" == "true" ]]; then
             printf "[/THINK]%s\n\n" "${COLOR_RESET}"
         fi
 
+        # Handle non-streaming output display
         if [[ "$BR_MODEL_STREAM" == "false" ]]; then
             if [[ -n "$reasoning_content" ]]; then
                 printf "%s[THINK]" "${COLOR_DIM}"
@@ -696,8 +714,8 @@ oai_make_request() {
         fi
 
         if [[ "$has_tool_calls" == "true" ]]; then
+            # Ensure exactly one blank line between text and tool calls
             if [[ -n "$response_content" ]]; then
-                # Ensure exactly one blank line between content and tool call
                 if [[ "$response_content" != *$'\n' ]]; then
                     printf "\n\n"
                 elif [[ "$response_content" != *$'\n\n' ]]; then
@@ -705,11 +723,13 @@ oai_make_request() {
                 fi
             fi
 
+            # Format accumulated tool calls
             local final_tool_calls="[]"
             for tc in "${current_tool_calls[@]}"; do
                 final_tool_calls=$(echo "$final_tool_calls" | jq --argjson tc "$tc" '. + [$tc]')
             done
 
+            # Append assistant message with tool_calls to history
             local assistant_msg
             if [[ -n "$response_content" ]]; then
                 assistant_msg=$(jq -n --arg content "$response_content" --argjson tool_calls "$final_tool_calls" '{role: "assistant", content: $content, tool_calls: $tool_calls}')
@@ -723,6 +743,7 @@ oai_make_request() {
 
             CONVERSATION+=("$assistant_msg")
 
+            # Execute each tool call sequentially
             local tc_length
             tc_length=$(echo "$final_tool_calls" | jq 'length')
             for ((i=0; i<tc_length; i++)); do
@@ -754,6 +775,7 @@ oai_make_request() {
                 fi
                 printf "%s[/TOOL_RESPONSE]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
+                # Append tool response to history for next API call
                 local tool_msg
                 tool_msg=$(jq -n \
                     --arg role "tool" \
@@ -763,8 +785,10 @@ oai_make_request() {
                 CONVERSATION+=("$tool_msg")
             done
 
+            # Loop again to send tool results back to LLM
             continue
         else
+            # No tool calls: append final assistant message and finish request
             local assistant_msg
             assistant_msg=$(jq -n --arg content "$response_content" '{role: "assistant", content: $content}')
             if [[ -n "$reasoning_content" ]]; then
