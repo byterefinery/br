@@ -501,13 +501,45 @@ oai_make_request() {
             local curl_exit_code=0
             local http_code="000"
             local err_detail=""
+            local INTERRUPTED=false
 
             if [[ "$BR_MODEL_STREAM" == "true" ]]; then
                 # Streaming Mode
-                local exit_code_file=$(mktemp)
-                while IFS= read -r line; do
+                local tmp_pipe=$(mktemp -u)
+                mkfifo "$tmp_pipe"
+
+                curl -s -N -w "\n%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$tmp_pipe" &
+                local CURL_PID=$!
+
+                local DONE_RECEIVED=false
+                exec 3< "$tmp_pipe"
+                while true; do
+                    # Check for ESC key (Interrupt)
+                    if IFS= read -t 0.001 -n 1 key 2>/dev/null; then
+                        if [[ "$key" == $'\e' ]]; then
+                            INTERRUPTED=true
+                            break
+                        fi
+                    fi
+
+                    # Check for data from curl
+                    if IFS= read -t 0.01 -r line <&3; then
+                        : # Data received
+                    elif [[ -n "$line" ]]; then
+                        : # EOF with partial line
+                    else
+                        # No data from curl
+                        if ! kill -0 "$CURL_PID" 2>/dev/null; then
+                            break # curl exited
+                        fi
+                        continue
+                    fi
+
                     [[ -z "$line" ]] && continue
-                    [[ "$line" == "data: [DONE]" ]] && break
+                    if [[ "$line" == "data: [DONE]" ]]; then
+                        DONE_RECEIVED=true
+                        break
+                    fi
 
                     if [[ "$line" =~ ^data:\ (.+)$ ]]; then
                         local json_data="${BASH_REMATCH[1]}"
@@ -591,18 +623,51 @@ oai_make_request() {
                     elif [[ "$line" =~ ^[0-9]{3}$ ]]; then
                         http_code="$line"
                     fi
-                done < <(
-                    curl -s -N -w "%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body"
-                    echo $? > "$exit_code_file"
-                )
-                curl_exit_code=$(cat "$exit_code_file")
-                rm -f "$exit_code_file"
+                done
+                exec 3<&-
+                rm -f "$tmp_pipe"
+
+                if [[ "$INTERRUPTED" == "true" ]]; then
+                    kill "$CURL_PID" 2>/dev/null
+                    wait "$CURL_PID" 2>/dev/null
+                    printf "\n%s[INTERRUPTED]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                    unset 'CONVERSATION[-1]' # Remove the user message since it wasn't processed
+                    return 0
+                fi
+
+                if [[ "$DONE_RECEIVED" == "true" || -n "$api_error" ]]; then
+                    kill "$CURL_PID" 2>/dev/null
+                    wait "$CURL_PID" 2>/dev/null
+                    curl_exit_code=0
+                else
+                    wait "$CURL_PID" 2>/dev/null
+                    curl_exit_code=$?
+                fi
 
             else
                 # Non-Streaming Mode
                 local response_file=$(mktemp)
-                curl -s -w "\n%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$response_file"
+                curl -s -w "\n%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$response_file" &
+                local CURL_PID=$!
+
+                while kill -0 "$CURL_PID" 2>/dev/null; do
+                    if IFS= read -t 0.1 -n 1 key 2>/dev/null; then
+                        if [[ "$key" == $'\e' ]]; then
+                            INTERRUPTED=true
+                            kill "$CURL_PID" 2>/dev/null
+                            break
+                        fi
+                    fi
+                done
+                wait "$CURL_PID" 2>/dev/null
                 curl_exit_code=$?
+
+                if [[ "$INTERRUPTED" == "true" ]]; then
+                    rm -f "$response_file"
+                    printf "\n%s[INTERRUPTED]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                    unset 'CONVERSATION[-1]' # Remove the user message since it wasn't processed
+                    return 0
+                fi
 
                 local response_raw
                 response_raw=$(cat "$response_file")
