@@ -17,14 +17,56 @@ bind '"\C-m": accept-line'
 bind '"\n": accept-line'
 
 # Set default values first
-export BASE_URL="${BASE_URL:-http://localhost:8080/v1}" # OAI compatible API
-export API_KEY="${API_KEY:-}"                           # sk-...
-export MODEL_NAME="${MODEL_NAME:-}"                     # ORG/MODEL
-export MODEL_INPUT="${MODEL_INPUT:-text}"               # text,image
-export MODEL_STREAM="${MODEL_STREAM:-true}"             # true or false
+export BR_BASE_URL="${BR_BASE_URL:-http://localhost:8080/v1}" # OAI compatible API
+export BR_API_KEY="${BR_API_KEY:-}"                           # sk-...
+export BR_MODEL_NAME="${BR_MODEL_NAME:-}"                     # ORG/MODEL
+export BR_MODEL_INPUT="${BR_MODEL_INPUT:-text}"               # text,image
+export BR_MODEL_STREAM="${BR_MODEL_STREAM:-true}"             # true or false
 
 # Global conversation history as array of JSON strings
 CONVERSATION=()
+
+# Global session headers for smart HTTP routing
+CONVERSATION_ID=""
+SESSION_AFFINITY=""
+
+# Generate a UUID v4
+generate_uuid() {
+    if command -v uuidgen >/dev/null 2>&1; then
+        uuidgen | tr '[:upper:]' '[:lower:]'
+    elif [[ -f /proc/sys/kernel/random/uuid ]]; then
+        cat /proc/sys/kernel/random/uuid
+    else
+        # Pure bash fallback for UUID v4
+        printf '%04x%04x-%04x-%04x-%04x-%04x%04x%04x\n' \
+            $RANDOM $RANDOM $RANDOM $(( ($RANDOM & 0x0fff) | 0x4000 )) \
+            $(( ($RANDOM & 0x3fff) | 0x8000 )) $RANDOM $RANDOM $RANDOM
+    fi
+}
+
+# Print configuration and session headers
+print_config_and_headers() {
+    local masked_api_key
+    if [[ -n "$BR_API_KEY" ]]; then
+        masked_api_key="${BR_API_KEY//?/*}"
+    else
+        masked_api_key="(empty)"
+    fi
+
+    local model_name_val="${BR_MODEL_NAME:-(empty)}"
+    local model_input_val="${BR_MODEL_INPUT:-text}"
+    local model_stream_val="${BR_MODEL_STREAM:-true}"
+
+    echo "Configuration:"
+    echo "  BR_BASE_URL     : $BR_BASE_URL"
+    echo "  BR_API_KEY      : $masked_api_key"
+    echo "  BR_MODEL_NAME   : $model_name_val"
+    echo "  BR_MODEL_INPUT  : $model_input_val"
+    echo "  BR_MODEL_STREAM : $model_stream_val"
+    echo "Headers:"
+    echo "  X-Conversation-Id  : $CONVERSATION_ID"
+    echo "  X-Session-Affinity : $SESSION_AFFINITY"
+}
 
 read_env_vars() {
     local config_file=""
@@ -48,32 +90,16 @@ read_env_vars() {
         set +a
     fi
 
-    # Mask the API_KEY based on its length so it doesn't leak
-    local masked_api_key
-    if [[ -n "$API_KEY" ]]; then
-        masked_api_key="${API_KEY//?/*}" # Replaces every character with an asterisk
-    else
-        masked_api_key="(empty)"
-    fi
-
-    local model_name_val="${MODEL_NAME:-(empty)}"
-    local model_input_val="${MODEL_INPUT:-text}"
-
-    # Parse MODEL_STREAM as boolean (case-insensitive, supports true/false, yes/no, 1/0)
-    local model_stream_val="${MODEL_STREAM:-true}"
+    # Parse BR_MODEL_STREAM as boolean (case-insensitive, supports true/false, yes/no, 1/0)
+    local model_stream_val="${BR_MODEL_STREAM:-true}"
     case "$model_stream_val" in
         [tT][rR][uU][eE]|[yY][eE][sS]|[yY]|1) model_stream_val="true" ;;
         *) model_stream_val="false" ;;
     esac
-    export MODEL_STREAM="$model_stream_val"
+    export BR_MODEL_STREAM="$model_stream_val"
 
-    # Print the active configuration
-    echo "Configuration:"
-    echo "  BASE_URL     : $BASE_URL"
-    echo "  API_KEY      : $masked_api_key"
-    echo "  MODEL_NAME   : $model_name_val"
-    echo "  MODEL_INPUT  : $model_input_val"
-    echo "  MODEL_STREAM : $model_stream_val"
+    # Print the active configuration and headers
+    print_config_and_headers
 }
 
 get_tools_json() {
@@ -399,19 +425,22 @@ oai_make_request() {
 
         local request_body
         request_body=$(jq -n \
-            --arg model "$MODEL_NAME" \
+            --arg model "$BR_MODEL_NAME" \
             --argjson messages "$messages_json" \
-            --argjson stream "$MODEL_STREAM" \
+            --argjson stream "$BR_MODEL_STREAM" \
             --argjson tools "$tools_json" \
             '{model: $model, messages: $messages, stream: $stream, tools: $tools}')
 
         local curl_args=()
         curl_args+=("-H" "Content-Type: application/json")
-        if [[ -n "$API_KEY" ]]; then
-            curl_args+=("-H" "Authorization: Bearer $API_KEY")
+        # Add session routing headers
+        curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
+        curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
+        if [[ -n "$BR_API_KEY" ]]; then
+            curl_args+=("-H" "Authorization: Bearer $BR_API_KEY")
         fi
 
-        if [[ "$MODEL_STREAM" == "true" ]]; then
+        if [[ "$BR_MODEL_STREAM" == "true" ]]; then
             local reasoning_content=""
             local reasoning_started=false
             local response_content=""
@@ -501,7 +530,7 @@ oai_make_request() {
                         done
                     fi
                 fi
-            done < <(curl -s -N "$BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
+            done < <(curl -s -N "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
 
             if [[ -n "$api_error" ]]; then
                 echo "API Error: $api_error"
@@ -587,7 +616,7 @@ oai_make_request() {
             fi
         else
             local response
-            response=$(curl -s "$BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
+            response=$(curl -s "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
 
             local error_msg
             error_msg=$(echo "$response" | jq -r '.error.message // empty')
@@ -672,6 +701,10 @@ oai_make_request() {
 }
 
 main() {
+    # Initialize session headers first so they are available for read_env_vars
+    CONVERSATION_ID=$(generate_uuid)
+    SESSION_AFFINITY=$(generate_uuid)
+
     # Initialize the environment before entering the loop
     read_env_vars
 
@@ -687,6 +720,16 @@ main() {
 
         # Break loop on EOF (Ctrl+D) to prevent infinite empty loops
         [[ -z "$message" ]] && break
+
+        # Handle session reset commands
+        if [[ "$message" == "/new" || "$message" == "/clear" ]]; then
+            echo "Previous session closed."
+            CONVERSATION=()
+            CONVERSATION_ID=$(generate_uuid)
+            SESSION_AFFINITY=$(generate_uuid)
+            print_config_and_headers
+            continue
+        fi
 
         echo
         echo -n "Assistant: "
