@@ -522,7 +522,7 @@ oai_make_request() {
                         reasoning_delta=$(echo "$json_data" | jq -r '.choices[0].delta.reasoning_content // empty')
                         if [[ -n "$reasoning_delta" ]]; then
                             if [[ "$reasoning_started" == "false" ]]; then
-                                printf "%s<think>" "${COLOR_DIM}"
+                                printf "%s[THINK]" "${COLOR_DIM}"
                                 reasoning_started=true
                             fi
                             printf "%s" "$reasoning_delta"
@@ -534,7 +534,7 @@ oai_make_request() {
                         content=$(echo "$json_data" | jq -r '.choices[0].delta.content // empty')
                         if [[ -n "$content" ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
-                                printf "</think>%s\n" "${COLOR_RESET}"
+                                printf "[/THINK]%s\n" "${COLOR_RESET}"
                                 reasoning_started=false
                             fi
                             if [[ "$has_tool_calls" == "true" ]]; then
@@ -551,7 +551,7 @@ oai_make_request() {
                         tc_count=$(echo "$json_data" | jq -r '.choices[0].delta.tool_calls | length // 0')
                         if [[ "$tc_count" -gt 0 ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
-                                printf "</think>%s\n" "${COLOR_RESET}"
+                                printf "[/THINK]%s\n" "${COLOR_RESET}"
                                 reasoning_started=false
                             fi
                             has_tool_calls=true
@@ -663,7 +663,7 @@ oai_make_request() {
         done
 
         if [[ "$reasoning_started" == "true" ]]; then
-            printf "</think>%s\n" "${COLOR_RESET}"
+            printf "[/THINK]%s\n" "${COLOR_RESET}"
         fi
         echo
 
@@ -695,11 +695,11 @@ oai_make_request() {
                 args_json=$(echo "$final_tool_calls" | jq -r ".[$i].function.arguments")
                 tc_json=$(echo "$final_tool_calls" | jq -c ".[$i]")
 
-                printf "%s<tool_call>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s[TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 echo "$tc_json" | jq $JQ_COLOR_FLAG .
-                printf "%s</tool_call>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s[/TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
-                printf "%s<tool_response>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf "%s" "${COLOR_DIM}"
                 local tool_output
                 local tool_exit=0
@@ -715,7 +715,7 @@ oai_make_request() {
                 else
                     echo "$tool_output"
                 fi
-                printf "%s</tool_response>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s[/TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
                 local tool_msg
                 tool_msg=$(jq -n \
