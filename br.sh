@@ -88,6 +88,10 @@ SESSION_AFFINITY=""
 GLOBAL_RETRY_COUNT=1
 GLOBAL_RETRY_DELAY=2
 
+# Global skill data (populated by load_skills)
+SKILL_USER_CONTENT=""
+SKILL_ASSISTANT_REPLY=""
+
 # Print configuration and session headers
 print_config_and_headers() {
     local masked_api_key
@@ -241,17 +245,23 @@ get_tools_json() {
 EOF
 }
 
-load_skills_system_message() {
+load_skills() {
     local skills_dir=".agents/skills"
+
+    SKILL_USER_CONTENT=""
+    SKILL_ASSISTANT_REPLY=""
 
     if [[ ! -d "$skills_dir" ]]; then
         return 0
     fi
 
     local skills_json="{}"
+    local -a skill_paths=()
 
     # Find every SKILL.md inside a subdirectory of .agents/skills
     while IFS= read -r -d '' skill_file; do
+        skill_paths+=("$skill_file")
+
         # Extract YAML frontmatter (lines between first and second ---)
         local frontmatter
         frontmatter=$(awk '
@@ -291,30 +301,45 @@ load_skills_system_message() {
         skills_block=$(echo "$skills_json" \
             | jq -r 'to_entries | map("\"\(.key)\": \(.value | tojson)") | join(", ")')
 
-        printf '%s\n' "Your skills can be found in \`.agents/skills\` directory."
+        # Build user message content (same content as previous system message)
+        SKILL_USER_CONTENT=""
+        SKILL_USER_CONTENT+="Skills are self-contained capability packages that agents load on-demand and progressively to execute specific tasks using specialized workflows, scripts, and documentation. "
+        SKILL_USER_CONTENT+="They are defined as directories centered around a required SKILL.md file, which uses YAML frontmatter for essential metadata (like name and description) and a Markdown body for detailed instructions. "
+        SKILL_USER_CONTENT+="Optional subdirectories can also be included to house helper scripts, references, and assets that the agent only pulls in when actively needed for the task."
+        SKILL_USER_CONTENT+=$'\n'
 
-        printf '%s' "Skills are self-contained capability packages that agents load on-demand and progressively to execute specific tasks using specialized workflows, scripts, and documentation. "
-        printf '%s' "They are defined as directories centered around a required SKILL.md file, which uses YAML frontmatter for essential metadata (like name and description) and a Markdown body for detailed instructions. "
-        printf '%s' "Optional subdirectories can also be included to house helper scripts, references, and assets that the agent only pulls in when actively needed for the task."
-        printf '\n'
+        SKILL_USER_CONTENT+=$'Your skills can be found in local `.agents/skills` directory.\n'
+        SKILL_USER_CONTENT+="Your available skills (where key is skill name and value is skill description) are: {"
+        SKILL_USER_CONTENT+="$skills_block"
+        SKILL_USER_CONTENT+=$'}\n'
 
-        printf '%s' "Your available skills where key is skill name and value is skill description are: {"
-        printf '%s' "$skills_block"
-        printf '%s\n' "}"
+        SKILL_USER_CONTENT+=$'When you see `/skill:<SKILL_NAME> <MESSAGE>`, read file `.agents/skills/<SKILL_NAME>/SKILL.md`. Read all <SKILL_NAME> reference files. List directory `.agents/skills/<SKILL_NAME>/scripts`. Do not read script files. If scripts are mentioned in skill file, see how scripts are used, and how <MESSAGE> should be passed to them.\n'
+
+        # Build simulated assistant reply listing skill file paths
+        SKILL_ASSISTANT_REPLY="Available skills are:"
+        for path in "${skill_paths[@]}"; do
+            SKILL_ASSISTANT_REPLY+=$'\n'"- $path"
+        done
     fi
 }
 
 init_conversation() {
     CONVERSATION=()
 
-    local system_content
-    system_content=$(load_skills_system_message)
+    load_skills
 
-    if [[ -n "$system_content" ]]; then
-        local system_msg
-        system_msg=$(jq -n --arg content "$system_content" \
-            '{role: "system", content: $content}')
-        CONVERSATION+=("$system_msg")
+    if [[ -n "$SKILL_USER_CONTENT" ]]; then
+        # Add user message with skills content (instead of system message)
+        local user_msg
+        user_msg=$(jq -n --arg content "$SKILL_USER_CONTENT" \
+            '{role: "user", content: $content}')
+        CONVERSATION+=("$user_msg")
+
+        # Add simulated assistant reply
+        local assistant_msg
+        assistant_msg=$(jq -n --arg content "$SKILL_ASSISTANT_REPLY" \
+            '{role: "assistant", content: $content}')
+        CONVERSATION+=("$assistant_msg")
     fi
 }
 
