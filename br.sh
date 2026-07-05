@@ -88,20 +88,6 @@ SESSION_AFFINITY=""
 GLOBAL_RETRY_COUNT=1
 GLOBAL_RETRY_DELAY=2
 
-# Generate a UUID v4
-generate_uuid() {
-    if command -v uuidgen >/dev/null 2>&1; then
-        uuidgen | tr '[:upper:]' '[:lower:]'
-    elif [[ -f /proc/sys/kernel/random/uuid ]]; then
-        cat /proc/sys/kernel/random/uuid
-    else
-        # Pure bash fallback for UUID v4
-        printf '%04x%04x-%04x-%04x-%04x-%04x%04x%04x\n' \
-            $RANDOM $RANDOM $RANDOM $(( ($RANDOM & 0x0fff) | 0x4000 )) \
-            $(( ($RANDOM & 0x3fff) | 0x8000 )) $RANDOM $RANDOM $RANDOM
-    fi
-}
-
 # Print configuration and session headers
 print_config_and_headers() {
     local masked_api_key
@@ -759,8 +745,8 @@ oai_make_request() {
 
 main() {
     # Initialize session headers first so they are available for read_env_vars
-    CONVERSATION_ID=$(generate_uuid)
-    SESSION_AFFINITY=$(generate_uuid)
+    CONVERSATION_ID=$(uuidgen)
+    SESSION_AFFINITY=$(uuidgen)
 
     # Initialize the environment before entering the loop
     read_env_vars
@@ -782,8 +768,8 @@ main() {
         if [[ "$message" == "/new" || "$message" == "/clear" ]]; then
             echo "Previous session closed."
             CONVERSATION=()
-            CONVERSATION_ID=$(generate_uuid)
-            SESSION_AFFINITY=$(generate_uuid)
+            CONVERSATION_ID=$(uuidgen)
+            SESSION_AFFINITY=$(uuidgen)
             print_config_and_headers
             continue
         fi
