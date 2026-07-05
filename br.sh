@@ -1,5 +1,57 @@
 #!/usr/bin/env bash
 
+# Flag parsing
+USE_COLOR=true
+SHOW_HELP=false
+
+for arg in "$@"; do
+    case "$arg" in
+        -h|--help)
+            SHOW_HELP=true
+            ;;
+        --no-color)
+            USE_COLOR=false
+            ;;
+        --color)
+            USE_COLOR=true
+            ;;
+    esac
+done
+
+if [[ "$SHOW_HELP" == "true" ]]; then
+    cat <<EOF
+Usage: br.sh [OPTIONS]
+
+A Bash-based interactive AI agent with tool-calling capabilities.
+
+Options:
+  -h, --help       Show this help message and exit
+      --color      Enable colored output (default)
+      --no-color   Disable colored output
+
+Environment Variables:
+  BR_BASE_URL      Base URL of the OpenAI-compatible API (default: http://localhost:8080/v1)
+  BR_API_KEY       API key for authentication
+  BR_MODEL_NAME    Model name to use
+  BR_MODEL_INPUT   Model input type (default: text)
+  BR_MODEL_STREAM  Enable streaming (default: true)
+  BR_TIMEOUT       Request timeout in seconds (default: 60)
+  BR_RETRIES       Maximum number of retries on failure (default: 100)
+EOF
+    exit 0
+fi
+
+# Color setup
+if [[ "$USE_COLOR" == "true" ]]; then
+    COLOR_DIM=$'\033[90m'
+    COLOR_RESET=$'\033[0m'
+    JQ_COLOR_FLAG="-C"
+else
+    COLOR_DIM=""
+    COLOR_RESET=""
+    JQ_COLOR_FLAG=""
+fi
+
 # Enable standard readline editing mode
 set -o emacs
 
@@ -495,7 +547,7 @@ oai_make_request() {
                         reasoning_delta=$(echo "$json_data" | jq -r '.choices[0].delta.reasoning_content // empty')
                         if [[ -n "$reasoning_delta" ]]; then
                             if [[ "$reasoning_started" == "false" ]]; then
-                                echo "<think>"
+                                printf "%s<think>" "${COLOR_DIM}"
                                 reasoning_started=true
                             fi
                             printf "%s" "$reasoning_delta"
@@ -507,7 +559,7 @@ oai_make_request() {
                         content=$(echo "$json_data" | jq -r '.choices[0].delta.content // empty')
                         if [[ -n "$content" ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
-                                echo "</think>"
+                                printf "</think>%s\n" "${COLOR_RESET}"
                                 reasoning_started=false
                             fi
                             if [[ "$has_tool_calls" == "true" ]]; then
@@ -524,7 +576,7 @@ oai_make_request() {
                         tc_count=$(echo "$json_data" | jq -r '.choices[0].delta.tool_calls | length // 0')
                         if [[ "$tc_count" -gt 0 ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
-                                echo "</think>"
+                                printf "</think>%s\n" "${COLOR_RESET}"
                                 reasoning_started=false
                             fi
                             has_tool_calls=true
@@ -636,7 +688,7 @@ oai_make_request() {
         done
 
         if [[ "$reasoning_started" == "true" ]]; then
-            echo "</think>"
+            printf "</think>%s\n" "${COLOR_RESET}"
         fi
         echo
 
@@ -668,17 +720,12 @@ oai_make_request() {
                 args_json=$(echo "$final_tool_calls" | jq -r ".[$i].function.arguments")
                 tc_json=$(echo "$final_tool_calls" | jq -c ".[$i]")
 
-                echo "
-<tool_call>
-"
-                echo "$tc_json" | jq .
-                echo "
-</tool_call>
-"
+                printf "%s<tool_call>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                echo "$tc_json" | jq $JQ_COLOR_FLAG .
+                printf "%s</tool_call>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
-                echo "
-<tool_response>
-"
+                printf "%s<tool_response>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s" "${COLOR_DIM}"
                 local tool_output
                 local tool_exit=0
                 tool_output=$(execute_tool "$func_name" "$args_json" 2>&1) || tool_exit=$?
@@ -693,9 +740,7 @@ oai_make_request() {
                 else
                     echo "$tool_output"
                 fi
-                echo "
-</tool_response>
-"
+                printf "%s</tool_response>%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
                 local tool_msg
                 tool_msg=$(jq -n \
