@@ -492,7 +492,6 @@ oai_make_request() {
             local reasoning_content=""
             local reasoning_started=false
             local response_content=""
-            local content_buffered=false
             local has_tool_calls=false
             local -a current_tool_calls=()
             local api_error=""
@@ -519,7 +518,8 @@ oai_make_request() {
 
                         # Reasoning content
                         local reasoning_delta
-                        reasoning_delta=$(echo "$json_data" | jq -r '.choices[0].delta.reasoning_content // empty')
+                        reasoning_delta=$(echo "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty'; printf x)
+                        reasoning_delta="${reasoning_delta%x}"
                         if [[ -n "$reasoning_delta" ]]; then
                             if [[ "$reasoning_started" == "false" ]]; then
                                 printf "%s[THINK]" "${COLOR_DIM}"
@@ -531,24 +531,20 @@ oai_make_request() {
 
                         # Content
                         local content
-                        content=$(echo "$json_data" | jq -r '.choices[0].delta.content // empty')
+                        content=$(echo "$json_data" | jq -j '.choices[0].delta.content // empty'; printf x)
+                        content="${content%x}"
                         if [[ -n "$content" ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
                                 printf "[/THINK]%s\n" "${COLOR_RESET}"
                                 reasoning_started=false
                             fi
-                            if [[ "$has_tool_calls" == "true" ]]; then
-                                response_content+="$content"
-                                content_buffered=true
-                            else
-                                printf "%s" "$content"
-                                response_content+="$content"
-                            fi
+                            printf "%s" "$content"
+                            response_content+="$content"
                         fi
 
                         # Tool calls
                         local tc_count
-                        tc_count=$(echo "$json_data" | jq -r '.choices[0].delta.tool_calls | length // 0')
+                        tc_count=$(echo "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length')
                         if [[ "$tc_count" -gt 0 ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
                                 printf "[/THINK]%s\n" "${COLOR_RESET}"
@@ -605,10 +601,32 @@ oai_make_request() {
                 local response
                 response=$(echo "$response_raw" | sed '$d')
 
-                local error_msg
-                error_msg=$(echo "$response" | jq -r '.error.message // empty')
-                if [[ -n "$error_msg" ]]; then
-                    api_error="$error_msg"
+                if [[ -n "$response" ]]; then
+                    local error_msg
+                    error_msg=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
+                    if [[ -n "$error_msg" ]]; then
+                        api_error="$error_msg"
+                    else
+                        local message_json
+                        message_json=$(echo "$response" | jq -c '.choices[0].message // empty' 2>/dev/null)
+                        if [[ -n "$message_json" ]]; then
+                            response_content=$(echo "$message_json" | jq -j '.content // empty'; printf x)
+                            response_content="${response_content%x}"
+                            reasoning_content=$(echo "$message_json" | jq -j '.reasoning_content // empty'; printf x)
+                            reasoning_content="${reasoning_content%x}"
+
+                            local tc_count
+                            tc_count=$(echo "$message_json" | jq '(.tool_calls // []) | length')
+                            if [[ "$tc_count" -gt 0 ]]; then
+                                has_tool_calls=true
+                                for ((i=0; i<tc_count; i++)); do
+                                    local tc_json
+                                    tc_json=$(echo "$message_json" | jq -c ".tool_calls[$i]")
+                                    current_tool_calls[$i]="$tc_json"
+                                done
+                            fi
+                        fi
+                    fi
                 fi
             fi
 
@@ -665,9 +683,21 @@ oai_make_request() {
         if [[ "$reasoning_started" == "true" ]]; then
             printf "[/THINK]%s\n" "${COLOR_RESET}"
         fi
-        echo
+
+        if [[ "$BR_MODEL_STREAM" == "false" ]]; then
+            if [[ -n "$reasoning_content" ]]; then
+                printf "%s[THINK]" "${COLOR_DIM}"
+                printf "%s" "$reasoning_content"
+                printf "[/THINK]%s\n" "${COLOR_RESET}"
+            fi
+            printf "%s" "$response_content"
+        fi
 
         if [[ "$has_tool_calls" == "true" ]]; then
+            if [[ -n "$response_content" ]]; then
+                echo
+            fi
+
             local final_tool_calls="[]"
             for tc in "${current_tool_calls[@]}"; do
                 final_tool_calls=$(echo "$final_tool_calls" | jq --argjson tc "$tc" '. + [$tc]')
@@ -726,10 +756,6 @@ oai_make_request() {
                 CONVERSATION+=("$tool_msg")
             done
 
-            if [[ "$content_buffered" == "true" ]]; then
-                echo "$response_content"
-            fi
-
             continue
         else
             local assistant_msg
@@ -738,6 +764,7 @@ oai_make_request() {
                 assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
             fi
             CONVERSATION+=("$assistant_msg")
+            echo
             break
         fi
     done
