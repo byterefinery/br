@@ -241,6 +241,83 @@ get_tools_json() {
 EOF
 }
 
+load_skills_system_message() {
+    local skills_dir=".agents/skills"
+
+    if [[ ! -d "$skills_dir" ]]; then
+        return 0
+    fi
+
+    local skills_json="{}"
+
+    # Find every SKILL.md inside a subdirectory of .agents/skills
+    while IFS= read -r -d '' skill_file; do
+        # Extract YAML frontmatter (lines between first and second ---)
+        local frontmatter
+        frontmatter=$(awk '
+            /^---[[:space:]]*$/ {
+                if (in_fm) exit
+                in_fm = 1
+                next
+            }
+            in_fm { print }
+        ' "$skill_file" 2>/dev/null)
+
+        # Parse name and description from frontmatter
+        local name desc
+        name=$(echo "$frontmatter" \
+               | grep '^name:' | head -1 \
+               | sed 's/^name:[[:space:]]*//' \
+               | sed "s/^['\"]//;s/['\"]$//" \
+               | tr -d '\r')
+        desc=$(echo "$frontmatter" \
+               | grep '^description:' | head -1 \
+               | sed 's/^description:[[:space:]]*//' \
+               | sed "s/^['\"]//;s/['\"]$//" \
+               | tr -d '\r')
+
+        if [[ -n "$name" ]]; then
+            skills_json=$(echo "$skills_json" \
+                | jq --arg n "$name" --arg d "${desc:-}" \
+                '. + {($n): $d}')
+        fi
+    done < <(find "$skills_dir" -mindepth 2 -name "SKILL.md" -print0 2>/dev/null)
+
+    local num_skills
+    num_skills=$(echo "$skills_json" | jq 'length')
+
+    if [[ "$num_skills" -gt 0 ]]; then
+        local skills_block
+        skills_block=$(echo "$skills_json" \
+            | jq -r 'to_entries | map("\"\(.key)\": \(.value | tojson)") | join(", ")')
+
+        printf '%s\n' "Your skills can be found in \`.agents/skills\` directory."
+
+        printf '%s' "Skills are self-contained capability packages that agents load on-demand and progressively to execute specific tasks using specialized workflows, scripts, and documentation. "
+        printf '%s' "They are defined as directories centered around a required SKILL.md file, which uses YAML frontmatter for essential metadata (like name and description) and a Markdown body for detailed instructions. "
+        printf '%s' "Optional subdirectories can also be included to house helper scripts, references, and assets that the agent only pulls in when actively needed for the task."
+        printf '\n'
+
+        printf '%s' "Your available skills where key is skill name and value is skill description are: {"
+        printf '%s' "$skills_block"
+        printf '%s\n' "}"
+    fi
+}
+
+init_conversation() {
+    CONVERSATION=()
+
+    local system_content
+    system_content=$(load_skills_system_message)
+
+    if [[ -n "$system_content" ]]; then
+        local system_msg
+        system_msg=$(jq -n --arg content "$system_content" \
+            '{role: "system", content: $content}')
+        CONVERSATION+=("$system_msg")
+    fi
+}
+
 read_file() {
     local args_json="$1"
 
@@ -643,7 +720,6 @@ oai_make_request() {
                     wait "$CURL_PID" 2>/dev/null
                     curl_exit_code=$?
                 fi
-
             else
                 # Non-Streaming Mode
                 local response_file=$(mktemp)
@@ -873,6 +949,7 @@ main() {
 
     # Initialize the environment before entering the loop
     read_env_vars
+    init_conversation
 
     # Main loop
     while true; do
@@ -895,10 +972,34 @@ main() {
         # Handle session reset commands
         if [[ "$message" == "/new" || "$message" == "/clear" ]]; then
             echo "Previous session closed."
-            CONVERSATION=()
+            init_conversation
             CONVERSATION_ID=$(uuidgen)
             SESSION_AFFINITY=$(uuidgen)
             print_config_and_headers
+            continue
+        fi
+
+        # Handle dump command for debugging
+        if [[ "$message" == "/dump" ]]; then
+            local messages_json="[]"
+            for msg in "${CONVERSATION[@]}"; do
+                messages_json=$(echo "$messages_json" | jq --argjson msg "$msg" '. + [$msg]')
+            done
+            echo "${COLOR_DIM}[CONVERSATION]${COLOR_RESET}"
+            echo "$messages_json" | jq $JQ_COLOR_FLAG .
+            echo "${COLOR_DIM}[/CONVERSATION]${COLOR_RESET}"
+            continue
+        fi
+
+        # Handle help command
+        if [[ "$message" == "/help" ]]; then
+            echo "${COLOR_DIM}Available commands:${COLOR_RESET}"
+            echo "  /help       Show this help message"
+            echo "  /dump       Print the current conversation history as JSON"
+            echo "  /new        Clear conversation history and start a new session"
+            echo "  /clear      Alias for /new"
+            echo "  /exit       Exit the agent harness"
+            echo "  /quit       Alias for /exit"
             continue
         fi
 
