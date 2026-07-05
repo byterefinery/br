@@ -822,6 +822,11 @@ main() {
         # Break loop on EOF (Ctrl+D) to prevent infinite empty loops
         [[ -z "$message" ]] && break
 
+        # Handle exit commands
+        if [[ "$message" == "/exit" || "$message" == "/quit" ]]; then
+            break
+        fi
+
         # Handle session reset commands
         if [[ "$message" == "/new" || "$message" == "/clear" ]]; then
             echo "Previous session closed."
