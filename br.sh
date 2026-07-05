@@ -22,6 +22,8 @@ export BR_API_KEY="${BR_API_KEY:-}"                           # sk-...
 export BR_MODEL_NAME="${BR_MODEL_NAME:-}"                     # ORG/MODEL
 export BR_MODEL_INPUT="${BR_MODEL_INPUT:-text}"               # text,image
 export BR_MODEL_STREAM="${BR_MODEL_STREAM:-true}"             # true or false
+export BR_TIMEOUT="${BR_TIMEOUT:-60}"                         # Timeout in seconds
+export BR_RETRIES="${BR_RETRIES:-100}"                        # Max retries
 
 # Global conversation history as array of JSON strings
 CONVERSATION=()
@@ -29,6 +31,10 @@ CONVERSATION=()
 # Global session headers for smart HTTP routing
 CONVERSATION_ID=""
 SESSION_AFFINITY=""
+
+# Global state for retry logic
+GLOBAL_RETRY_COUNT=1
+GLOBAL_RETRY_DELAY=2
 
 # Generate a UUID v4
 generate_uuid() {
@@ -56,6 +62,8 @@ print_config_and_headers() {
     local model_name_val="${BR_MODEL_NAME:-(empty)}"
     local model_input_val="${BR_MODEL_INPUT:-text}"
     local model_stream_val="${BR_MODEL_STREAM:-true}"
+    local timeout_val="${BR_TIMEOUT:-60}"
+    local retries_val="${BR_RETRIES:-100}"
 
     echo "Configuration:"
     echo "  BR_BASE_URL     : $BR_BASE_URL"
@@ -63,6 +71,8 @@ print_config_and_headers() {
     echo "  BR_MODEL_NAME   : $model_name_val"
     echo "  BR_MODEL_INPUT  : $model_input_val"
     echo "  BR_MODEL_STREAM : $model_stream_val"
+    echo "  BR_TIMEOUT      : $timeout_val"
+    echo "  BR_RETRIES      : $retries_val"
     echo "Headers:"
     echo "  X-Conversation-Id  : $CONVERSATION_ID"
     echo "  X-Session-Affinity : $SESSION_AFFINITY"
@@ -97,6 +107,14 @@ read_env_vars() {
         *) model_stream_val="false" ;;
     esac
     export BR_MODEL_STREAM="$model_stream_val"
+
+    # Validate timeout and retries as integers
+    if ! [[ "$BR_TIMEOUT" =~ ^[0-9]+$ ]]; then
+        export BR_TIMEOUT=60
+    fi
+    if ! [[ "$BR_RETRIES" =~ ^[0-9]+$ ]]; then
+        export BR_RETRIES=100
+    fi
 
     # Print the active configuration and headers
     print_config_and_headers
@@ -440,7 +458,10 @@ oai_make_request() {
             curl_args+=("-H" "Authorization: Bearer $BR_API_KEY")
         fi
 
-        if [[ "$BR_MODEL_STREAM" == "true" ]]; then
+        local request_successful=false
+
+        # Retry loop for communication failures
+        while [[ "$request_successful" == "false" ]]; do
             local reasoning_content=""
             local reasoning_started=false
             local response_content=""
@@ -448,254 +469,256 @@ oai_make_request() {
             local has_tool_calls=false
             local -a current_tool_calls=()
             local api_error=""
+            local curl_exit_code=0
+            local http_code="000"
+            local err_detail=""
 
-            while IFS= read -r line; do
-                [[ -z "$line" ]] && continue
-                [[ "$line" == "data: [DONE]" ]] && break
+            if [[ "$BR_MODEL_STREAM" == "true" ]]; then
+                local exit_code_file=$(mktemp)
+                while IFS= read -r line; do
+                    [[ -z "$line" ]] && continue
+                    [[ "$line" == "data: [DONE]" ]] && break
 
-                if [[ "$line" =~ ^data:\ (.+)$ ]]; then
-                    local json_data="${BASH_REMATCH[1]}"
+                    if [[ "$line" =~ ^data:\ (.+)$ ]]; then
+                        local json_data="${BASH_REMATCH[1]}"
 
-                    # Check for API error
-                    local err_msg
-                    err_msg=$(echo "$json_data" | jq -r '.error.message // empty')
-                    if [[ -n "$err_msg" ]]; then
-                        api_error="$err_msg"
-                        break
-                    fi
-
-                    # Reasoning content
-                    local reasoning_delta
-                    reasoning_delta=$(echo "$json_data" | jq -r '.choices[0].delta.reasoning_content // empty')
-                    if [[ -n "$reasoning_delta" ]]; then
-                        if [[ "$reasoning_started" == "false" ]]; then
-                            echo "<think>"
-                            reasoning_started=true
+                        # Check for API error
+                        local err_msg
+                        err_msg=$(echo "$json_data" | jq -r '.error.message // empty')
+                        if [[ -n "$err_msg" ]]; then
+                            api_error="$err_msg"
+                            break
                         fi
-                        printf "%s" "$reasoning_delta"
-                        reasoning_content+="$reasoning_delta"
-                    fi
 
-                    # Content
-                    local content
-                    content=$(echo "$json_data" | jq -r '.choices[0].delta.content // empty')
-                    if [[ -n "$content" ]]; then
-                        if [[ "$reasoning_started" == "true" ]]; then
-                            echo "</think>"
-                            reasoning_started=false
-                        fi
-                        if [[ "$has_tool_calls" == "true" ]]; then
-                            response_content+="$content"
-                            content_buffered=true
-                        else
-                            printf "%s" "$content"
-                            response_content+="$content"
-                        fi
-                    fi
-
-                    # Tool calls
-                    local tc_count
-                    tc_count=$(echo "$json_data" | jq -r '.choices[0].delta.tool_calls | length // 0')
-                    if [[ "$tc_count" -gt 0 ]]; then
-                        if [[ "$reasoning_started" == "true" ]]; then
-                            echo "</think>"
-                            reasoning_started=false
-                        fi
-                        has_tool_calls=true
-                        for ((i=0; i<tc_count; i++)); do
-                            local idx
-                            idx=$(echo "$json_data" | jq -r ".choices[0].delta.tool_calls[$i].index")
-
-                            if [[ -z "${current_tool_calls[$idx]}" ]]; then
-                                current_tool_calls[$idx]="{}"
+                        # Reasoning content
+                        local reasoning_delta
+                        reasoning_delta=$(echo "$json_data" | jq -r '.choices[0].delta.reasoning_content // empty')
+                        if [[ -n "$reasoning_delta" ]]; then
+                            if [[ "$reasoning_started" == "false" ]]; then
+                                echo "<think>"
+                                reasoning_started=true
                             fi
-
-                            local delta_tc
-                            delta_tc=$(echo "$json_data" | jq -c ".choices[0].delta.tool_calls[$i]")
-                            current_tool_calls[$idx]=$(echo "${current_tool_calls[$idx]}" "$delta_tc" | jq -s '
-                                .[0] as $base | .[1] as $delta |
-                                $base |
-                                if $delta.id then .id = $delta.id else . end |
-                                if $delta.type then .type = $delta.type else . end |
-                                if $delta.function then
-                                    .function = (
-                                        (.function // {}) |
-                                        if $delta.function.name then .name = $delta.function.name else . end |
-                                        if $delta.function.arguments then
-                                            .arguments = ((.arguments // "") + $delta.function.arguments)
-                                        else . end
-                                    )
-                                else . end
-                            ')
-                        done
-                    fi
-                fi
-            done < <(curl -s -N "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
-
-            if [[ -n "$api_error" ]]; then
-                echo "API Error: $api_error"
-                break
-            fi
-
-            if [[ "$reasoning_started" == "true" ]]; then
-                echo "</think>"
-            fi
-            echo
-
-            if [[ "$has_tool_calls" == "true" ]]; then
-                local final_tool_calls="[]"
-                for tc in "${current_tool_calls[@]}"; do
-                    final_tool_calls=$(echo "$final_tool_calls" | jq --argjson tc "$tc" '. + [$tc]')
-                done
-
-                local assistant_msg
-                if [[ -n "$response_content" ]]; then
-                    assistant_msg=$(jq -n --arg content "$response_content" --argjson tool_calls "$final_tool_calls" '{role: "assistant", content: $content, tool_calls: $tool_calls}')
-                else
-                    assistant_msg=$(jq -n --argjson tool_calls "$final_tool_calls" '{role: "assistant", tool_calls: $tool_calls}')
-                fi
-
-                if [[ -n "$reasoning_content" ]]; then
-                    assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
-                fi
-
-                CONVERSATION+=("$assistant_msg")
-
-                local tc_length
-                tc_length=$(echo "$final_tool_calls" | jq 'length')
-                for ((i=0; i<tc_length; i++)); do
-                    local tc_id func_name args_json tc_json
-                    tc_id=$(echo "$final_tool_calls" | jq -r ".[$i].id")
-                    func_name=$(echo "$final_tool_calls" | jq -r ".[$i].function.name")
-                    args_json=$(echo "$final_tool_calls" | jq -r ".[$i].function.arguments")
-                    tc_json=$(echo "$final_tool_calls" | jq -c ".[$i]")
-
-                    echo "<tool_call>"
-                    echo "$tc_json" | jq .
-                    echo "</tool_call>"
-
-                    echo "<tool_response>"
-                    local tool_output
-                    local tool_exit=0
-                    tool_output=$(execute_tool "$func_name" "$args_json" 2>&1) || tool_exit=$?
-
-                    if [[ $tool_exit -ne 0 ]]; then
-                        if [[ "$tool_output" != Error:* ]]; then
-                            echo "Error: $tool_output"
-                            tool_output="Error: $tool_output"
-                        else
-                            echo "$tool_output"
+                            printf "%s" "$reasoning_delta"
+                            reasoning_content+="$reasoning_delta"
                         fi
-                    else
-                        echo "$tool_output"
+
+                        # Content
+                        local content
+                        content=$(echo "$json_data" | jq -r '.choices[0].delta.content // empty')
+                        if [[ -n "$content" ]]; then
+                            if [[ "$reasoning_started" == "true" ]]; then
+                                echo "</think>"
+                                reasoning_started=false
+                            fi
+                            if [[ "$has_tool_calls" == "true" ]]; then
+                                response_content+="$content"
+                                content_buffered=true
+                            else
+                                printf "%s" "$content"
+                                response_content+="$content"
+                            fi
+                        fi
+
+                        # Tool calls
+                        local tc_count
+                        tc_count=$(echo "$json_data" | jq -r '.choices[0].delta.tool_calls | length // 0')
+                        if [[ "$tc_count" -gt 0 ]]; then
+                            if [[ "$reasoning_started" == "true" ]]; then
+                                echo "</think>"
+                                reasoning_started=false
+                            fi
+                            has_tool_calls=true
+                            for ((i=0; i<tc_count; i++)); do
+                                local idx
+                                idx=$(echo "$json_data" | jq -r ".choices[0].delta.tool_calls[$i].index")
+
+                                if [[ -z "${current_tool_calls[$idx]}" ]]; then
+                                    current_tool_calls[$idx]="{}"
+                                fi
+
+                                local delta_tc
+                                delta_tc=$(echo "$json_data" | jq -c ".choices[0].delta.tool_calls[$i]")
+                                current_tool_calls[$idx]=$(echo "${current_tool_calls[$idx]}" "$delta_tc" | jq -s '
+                                    .[0] as $base | .[1] as $delta |
+                                    $base |
+                                    if $delta.id then .id = $delta.id else . end |
+                                    if $delta.type then .type = $delta.type else . end |
+                                    if $delta.function then
+                                        .function = (
+                                            (.function // {}) |
+                                            if $delta.function.name then .name = $delta.function.name else . end |
+                                            if $delta.function.arguments then
+                                                .arguments = ((.arguments // "") + $delta.function.arguments)
+                                            else . end
+                                        )
+                                    else . end
+                                ')
+                            done
+                        fi
+                    elif [[ "$line" =~ ^[0-9]{3}$ ]]; then
+                        http_code="$line"
                     fi
-                    echo "</tool_response>"
+                done < <(
+                    curl -s -N -w "%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body"
+                    echo $? > "$exit_code_file"
+                )
+                curl_exit_code=$(cat "$exit_code_file")
+                rm -f "$exit_code_file"
 
-                    local tool_msg
-                    tool_msg=$(jq -n \
-                        --arg role "tool" \
-                        --arg content "$tool_output" \
-                        --arg tool_call_id "$tc_id" \
-                        '{role: $role, content: $content, tool_call_id: $tool_call_id}')
-                    CONVERSATION+=("$tool_msg")
-                done
-
-                if [[ "$content_buffered" == "true" ]]; then
-                    echo "$response_content"
-                fi
-
-                continue
             else
-                local assistant_msg
-                assistant_msg=$(jq -n --arg content "$response_content" '{role: "assistant", content: $content}')
-                if [[ -n "$reasoning_content" ]]; then
-                    assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
+                local response_file=$(mktemp)
+                curl -s -w "\n%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$response_file"
+                curl_exit_code=$?
+
+                local response_raw
+                response_raw=$(cat "$response_file")
+                rm -f "$response_file"
+
+                http_code=$(echo "$response_raw" | tail -n 1)
+                local response
+                response=$(echo "$response_raw" | sed '$d')
+
+                local error_msg
+                error_msg=$(echo "$response" | jq -r '.error.message // empty')
+                if [[ -n "$error_msg" ]]; then
+                    api_error="$error_msg"
                 fi
-                CONVERSATION+=("$assistant_msg")
-                break
-            fi
-        else
-            local response
-            response=$(curl -s "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
-
-            local error_msg
-            error_msg=$(echo "$response" | jq -r '.error.message // empty')
-            if [[ -n "$error_msg" ]]; then
-                echo "API Error: $error_msg"
-                break
             fi
 
-            local reasoning_content
-            reasoning_content=$(echo "$response" | jq -r '.choices[0].message.reasoning_content // empty')
+            # Determine if we should retry
+            local should_retry=false
+            if [[ $curl_exit_code -ne 0 ]]; then
+                should_retry=true
+                err_detail="Connection failed (curl exit code $curl_exit_code)"
+            elif [[ "$http_code" =~ ^5 ]]; then
+                should_retry=true
+                err_detail="Server error (HTTP $http_code)"
+            elif [[ -n "$api_error" ]]; then
+                if [[ "$http_code" =~ ^4 ]]; then
+                    should_retry=false
+                    err_detail="Client error (HTTP $http_code): $api_error"
+                else
+                    should_retry=true
+                    err_detail="API Error: $api_error"
+                fi
+            fi
+
+            if [[ "$should_retry" == "true" ]]; then
+                if [[ $GLOBAL_RETRY_COUNT -gt $BR_RETRIES ]]; then
+                    echo -e "\n[Max retries ($BR_RETRIES) reached. Aborting request.]"
+                    return 1
+                fi
+
+                echo -e "\n[Error communicating with LLM server: $err_detail]"
+                echo "[Retry $GLOBAL_RETRY_COUNT/$BR_RETRIES in ${GLOBAL_RETRY_DELAY}s...]"
+
+                sleep "$GLOBAL_RETRY_DELAY"
+
+                # Update delay exponentially (2, 4, 8, 16, 32, 64, 128, then reset to 2)
+                GLOBAL_RETRY_DELAY=$((GLOBAL_RETRY_DELAY * 2))
+                if [[ $GLOBAL_RETRY_DELAY -gt 128 ]]; then
+                    GLOBAL_RETRY_DELAY=2
+                fi
+                GLOBAL_RETRY_COUNT=$((GLOBAL_RETRY_COUNT + 1))
+                continue
+            fi
+
+            # If it's a fatal client error, abort
+            if [[ "$should_retry" == "false" && -n "$api_error" ]]; then
+                echo -e "\nAPI Error: $api_error"
+                return 1
+            fi
+
+            # Successful communication, reset retry state
+            request_successful=true
+            GLOBAL_RETRY_COUNT=1
+            GLOBAL_RETRY_DELAY=2
+        done
+
+        if [[ "$reasoning_started" == "true" ]]; then
+            echo "</think>"
+        fi
+        echo
+
+        if [[ "$has_tool_calls" == "true" ]]; then
+            local final_tool_calls="[]"
+            for tc in "${current_tool_calls[@]}"; do
+                final_tool_calls=$(echo "$final_tool_calls" | jq --argjson tc "$tc" '. + [$tc]')
+            done
+
+            local assistant_msg
+            if [[ -n "$response_content" ]]; then
+                assistant_msg=$(jq -n --arg content "$response_content" --argjson tool_calls "$final_tool_calls" '{role: "assistant", content: $content, tool_calls: $tool_calls}')
+            else
+                assistant_msg=$(jq -n --argjson tool_calls "$final_tool_calls" '{role: "assistant", tool_calls: $tool_calls}')
+            fi
+
             if [[ -n "$reasoning_content" ]]; then
-                echo "<think>"
-                echo "$reasoning_content"
-                echo "</think>"
+                assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
             fi
+
+            CONVERSATION+=("$assistant_msg")
 
             local tc_length
-            tc_length=$(echo "$response" | jq -r '.choices[0].message.tool_calls | length // 0')
+            tc_length=$(echo "$final_tool_calls" | jq 'length')
+            for ((i=0; i<tc_length; i++)); do
+                local tc_id func_name args_json tc_json
+                tc_id=$(echo "$final_tool_calls" | jq -r ".[$i].id")
+                func_name=$(echo "$final_tool_calls" | jq -r ".[$i].function.name")
+                args_json=$(echo "$final_tool_calls" | jq -r ".[$i].function.arguments")
+                tc_json=$(echo "$final_tool_calls" | jq -c ".[$i]")
 
-            if [[ "$tc_length" -gt 0 ]]; then
-                local assistant_msg
-                assistant_msg=$(echo "$response" | jq -c '.choices[0].message | {role, content, tool_calls, reasoning_content} | with_entries(select(.value != null))')
-                CONVERSATION+=("$assistant_msg")
+                echo "
+<tool_call>
+"
+                echo "$tc_json" | jq .
+                echo "
+</tool_call>
+"
 
-                for ((i=0; i<tc_length; i++)); do
-                    local tc_id func_name args_json tc_json
-                    tc_id=$(echo "$response" | jq -r ".choices[0].message.tool_calls[$i].id")
-                    func_name=$(echo "$response" | jq -r ".choices[0].message.tool_calls[$i].function.name")
-                    args_json=$(echo "$response" | jq -r ".choices[0].message.tool_calls[$i].function.arguments")
-                    tc_json=$(echo "$response" | jq -c ".choices[0].message.tool_calls[$i]")
+                echo "
+<tool_response>
+"
+                local tool_output
+                local tool_exit=0
+                tool_output=$(execute_tool "$func_name" "$args_json" 2>&1) || tool_exit=$?
 
-                    echo "<tool_call>"
-                    echo "$tc_json" | jq .
-                    echo "</tool_call>"
-
-                    echo "<tool_response>"
-                    local tool_output
-                    local tool_exit=0
-                    tool_output=$(execute_tool "$func_name" "$args_json" 2>&1) || tool_exit=$?
-
-                    if [[ $tool_exit -ne 0 ]]; then
-                        if [[ "$tool_output" != Error:* ]]; then
-                            echo "Error: $tool_output"
-                            tool_output="Error: $tool_output"
-                        else
-                            echo "$tool_output"
-                        fi
+                if [[ $tool_exit -ne 0 ]]; then
+                    if [[ "$tool_output" != Error:* ]]; then
+                        echo "Error: $tool_output"
+                        tool_output="Error: $tool_output"
                     else
                         echo "$tool_output"
                     fi
-                    echo "</tool_response>"
-
-                    local tool_msg
-                    tool_msg=$(jq -n \
-                        --arg role "tool" \
-                        --arg content "$tool_output" \
-                        --arg tool_call_id "$tc_id" \
-                        '{role: $role, content: $content, tool_call_id: $tool_call_id}')
-                    CONVERSATION+=("$tool_msg")
-                done
-
-                local response_content
-                response_content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
-                if [[ -n "$response_content" ]]; then
-                    echo "$response_content"
+                else
+                    echo "$tool_output"
                 fi
+                echo "
+</tool_response>
+"
 
-                continue
-            else
-                local response_content
-                response_content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
-                if [[ -n "$response_content" ]]; then
-                    echo "$response_content"
-                fi
-                local assistant_msg
-                assistant_msg=$(echo "$response" | jq -c '.choices[0].message | {role, content, reasoning_content} | with_entries(select(.value != null))')
-                CONVERSATION+=("$assistant_msg")
-                break
+                local tool_msg
+                tool_msg=$(jq -n \
+                    --arg role "tool" \
+                    --arg content "$tool_output" \
+                    --arg tool_call_id "$tc_id" \
+                    '{role: $role, content: $content, tool_call_id: $tool_call_id}')
+                CONVERSATION+=("$tool_msg")
+            done
+
+            if [[ "$content_buffered" == "true" ]]; then
+                echo "$response_content"
             fi
+
+            continue
+        else
+            local assistant_msg
+            assistant_msg=$(jq -n --arg content "$response_content" '{role: "assistant", content: $content}')
+            if [[ -n "$reasoning_content" ]]; then
+                assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
+            fi
+            CONVERSATION+=("$assistant_msg")
+            break
         fi
     done
 }
