@@ -478,7 +478,6 @@ oai_make_request() {
 
         local curl_args=()
         curl_args+=("-H" "Content-Type: application/json")
-        # Add session routing headers
         curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
         curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
         if [[ -n "$BR_API_KEY" ]]; then
@@ -487,7 +486,6 @@ oai_make_request() {
 
         local request_successful=false
 
-        # Retry loop for communication failures
         while [[ "$request_successful" == "false" ]]; do
             local reasoning_content=""
             local reasoning_started=false
@@ -508,7 +506,6 @@ oai_make_request() {
                     if [[ "$line" =~ ^data:\ (.+)$ ]]; then
                         local json_data="${BASH_REMATCH[1]}"
 
-                        # Check for API error
                         local err_msg
                         err_msg=$(echo "$json_data" | jq -r '.error.message // empty')
                         if [[ -n "$err_msg" ]]; then
@@ -516,7 +513,6 @@ oai_make_request() {
                             break
                         fi
 
-                        # Reasoning content
                         local reasoning_delta
                         reasoning_delta=$(echo "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty'; printf x)
                         reasoning_delta="${reasoning_delta%x}"
@@ -529,25 +525,29 @@ oai_make_request() {
                             reasoning_content+="$reasoning_delta"
                         fi
 
-                        # Content
                         local content
                         content=$(echo "$json_data" | jq -j '.choices[0].delta.content // empty'; printf x)
                         content="${content%x}"
                         if [[ -n "$content" ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
-                                printf "[/THINK]%s\n" "${COLOR_RESET}"
+                                printf "[/THINK]%s\n\n" "${COLOR_RESET}"
                                 reasoning_started=false
+                                # Strip leading newlines from content to avoid excessive blank lines
+                                while [[ "$content" =~ ^$'\n' ]]; do
+                                    content="${content:1}"
+                                done
                             fi
-                            printf "%s" "$content"
-                            response_content+="$content"
+                            if [[ -n "$content" ]]; then
+                                printf "%s" "$content"
+                                response_content+="$content"
+                            fi
                         fi
 
-                        # Tool calls
                         local tc_count
                         tc_count=$(echo "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length')
                         if [[ "$tc_count" -gt 0 ]]; then
                             if [[ "$reasoning_started" == "true" ]]; then
-                                printf "[/THINK]%s\n" "${COLOR_RESET}"
+                                printf "[/THINK]%s\n\n" "${COLOR_RESET}"
                                 reasoning_started=false
                             fi
                             has_tool_calls=true
@@ -630,7 +630,6 @@ oai_make_request() {
                 fi
             fi
 
-            # Determine if we should retry
             local should_retry=false
             if [[ $curl_exit_code -ne 0 ]]; then
                 should_retry=true
@@ -659,7 +658,6 @@ oai_make_request() {
 
                 sleep "$GLOBAL_RETRY_DELAY"
 
-                # Update delay exponentially (2, 4, 8, 16, 32, 64, 128, then reset to 2)
                 GLOBAL_RETRY_DELAY=$((GLOBAL_RETRY_DELAY * 2))
                 if [[ $GLOBAL_RETRY_DELAY -gt 128 ]]; then
                     GLOBAL_RETRY_DELAY=2
@@ -668,34 +666,43 @@ oai_make_request() {
                 continue
             fi
 
-            # If it's a fatal client error, abort
             if [[ "$should_retry" == "false" && -n "$api_error" ]]; then
                 echo -e "\nAPI Error: $api_error"
                 return 1
             fi
 
-            # Successful communication, reset retry state
             request_successful=true
             GLOBAL_RETRY_COUNT=1
             GLOBAL_RETRY_DELAY=2
         done
 
         if [[ "$reasoning_started" == "true" ]]; then
-            printf "[/THINK]%s\n" "${COLOR_RESET}"
+            printf "[/THINK]%s\n\n" "${COLOR_RESET}"
         fi
 
         if [[ "$BR_MODEL_STREAM" == "false" ]]; then
             if [[ -n "$reasoning_content" ]]; then
                 printf "%s[THINK]" "${COLOR_DIM}"
                 printf "%s" "$reasoning_content"
-                printf "[/THINK]%s\n" "${COLOR_RESET}"
+                printf "[/THINK]%s\n\n" "${COLOR_RESET}"
             fi
-            printf "%s" "$response_content"
+            # Strip leading newlines from response_content
+            while [[ "$response_content" =~ ^$'\n' ]]; do
+                response_content="${response_content:1}"
+            done
+            if [[ -n "$response_content" ]]; then
+                printf "%s" "$response_content"
+            fi
         fi
 
         if [[ "$has_tool_calls" == "true" ]]; then
             if [[ -n "$response_content" ]]; then
-                echo
+                # Ensure exactly one blank line between content and tool call
+                if [[ "$response_content" != *$'\n' ]]; then
+                    printf "\n\n"
+                elif [[ "$response_content" != *$'\n\n' ]]; then
+                    printf "\n"
+                fi
             fi
 
             local final_tool_calls="[]"
@@ -727,7 +734,7 @@ oai_make_request() {
 
                 printf "%s[TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 echo "$tc_json" | jq $JQ_COLOR_FLAG .
-                printf "%s[/TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s[/TOOL_CALL]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
                 printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf "%s" "${COLOR_DIM}"
@@ -745,7 +752,7 @@ oai_make_request() {
                 else
                     echo "$tool_output"
                 fi
-                printf "%s[/TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s[/TOOL_RESPONSE]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
                 local tool_msg
                 tool_msg=$(jq -n \
@@ -764,7 +771,7 @@ oai_make_request() {
                 assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
             fi
             CONVERSATION+=("$assistant_msg")
-            echo
+            printf "\n"
             break
         fi
     done
