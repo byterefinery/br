@@ -1,37 +1,31 @@
 #!/bin/bash
 
+# Enable standard readline editing mode
 set -o emacs
 
-# make CTRL-C arrive as a normal character to readline (so our binding can handle it)
-# we re-apply this before every read because readline restores terminal modes after each input
-apply_tty_settings() {
-    stty -echoctl -isig intr undef
-}
+# READLINE BINDINGS:
+# Ctrl+K then Ctrl+J: Insert literal newline
+bind '"\C-k\C-j": "\C-v\C-j"'
+# Ctrl+J: Accept input (Send)
+bind '"\C-j": accept-line'
+# Alt+Enter: Insert literal newline (ESC + Return/LineFeed)
+bind '"\e\r": "\C-v\C-j"'
+bind '"\e\n": "\C-v\C-j"'
+# Enter: Accept input (Return, Ctrl+M, or LineFeed)
+bind '"\r": accept-line'
+bind '"\C-m": accept-line'
+bind '"\n": accept-line'
 
-apply_tty_settings
-
-# never die on SIGINT (belt + suspenders)
-trap '' SIGINT
-
-# restore terminal when on finally exit
-trap 'stty sane; stty "$OLD_STTY" 2>/dev/null || true' EXIT
-
-OLD_STTY=$(stty -g)
-
-bind '"\C-c": kill-whole-line'
-
+# MAIN LOOP
 while true; do
-    apply_tty_settings
-    read -r -e -p "User: " user_message_content
-    status=$?
+    # -p: prompt
+    # -d $'\r': delimiter to capture embedded newlines
+    # -e: enable readline
+    # -r: raw input
+    read -p "User: " -d $'\r' -e -r message
 
-    if [ "$status" -ne 0 ]; then
-        exit 0
-    fi
+    # Break loop on EOF (Ctrl+D) to prevent infinite empty loops
+    [[ -z "$message" ]] && break
 
-    if [ -z "$user_message_content" ]; then
-        continue
-    fi
-
-    echo "Assistant: $user_message_content"
+    echo "Assistant: $message"
 done
