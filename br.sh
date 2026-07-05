@@ -17,11 +17,14 @@ bind '"\C-m": accept-line'
 bind '"\n": accept-line'
 
 # Set default values first
-export BASE_URL="http://localhost:8080/v1"      # OAI compatible API
-export API_KEY=""                               # sk-...
-export MODEL_NAME=""                            # ORG/MODEL
-export MODEL_INPUT="text"                       # text,image
-export MODEL_STREAM=true                        # true or false
+export BASE_URL="${BASE_URL:-http://localhost:8080/v1}" # OAI compatible API
+export API_KEY="${API_KEY:-}"                           # sk-...
+export MODEL_NAME="${MODEL_NAME:-}"                     # ORG/MODEL
+export MODEL_INPUT="${MODEL_INPUT:-text}"               # text,image
+export MODEL_STREAM="${MODEL_STREAM:-true}"             # true or false
+
+# Global conversation history as array of role-content pairs
+CONVERSATION=()
 
 read_env_vars() {
     local config_file=""
@@ -74,7 +77,71 @@ read_env_vars() {
 }
 
 oai_make_request() {
-    echo ""
+    local user_message="$1"
+
+    # Add user message to conversation
+    CONVERSATION+=("user" "$user_message")
+
+    # Build messages array using jq
+    local messages_json="[]"
+    for ((i=0; i<${#CONVERSATION[@]}; i+=2)); do
+        local role="${CONVERSATION[i]}"
+        local content="${CONVERSATION[i+1]}"
+        messages_json=$(echo "$messages_json" | jq --arg role "$role" --arg content "$content" '. + [{"role": $role, "content": $content}]')
+    done
+
+    # Build request body
+    local request_body
+    request_body=$(jq -n \
+        --arg model "$MODEL_NAME" \
+        --argjson messages "$messages_json" \
+        --argjson stream "$MODEL_STREAM" \
+        '{model: $model, messages: $messages, stream: $stream}')
+
+    local response_content=""
+
+    # Build curl headers
+    local curl_args=()
+    curl_args+=("-H" "Content-Type: application/json")
+    if [[ -n "$API_KEY" ]]; then
+        curl_args+=("-H" "Authorization: Bearer $API_KEY")
+    fi
+
+    if [[ "$MODEL_STREAM" == "true" ]]; then
+        # Streaming mode
+        while IFS= read -r line; do
+            # Skip empty lines
+            [[ -z "$line" ]] && continue
+
+            # Check for [DONE]
+            [[ "$line" == "data: [DONE]" ]] && break
+
+            # Extract data after "data: "
+            if [[ "$line" =~ ^data:\ (.+)$ ]]; then
+                local json_data="${BASH_REMATCH[1]}"
+
+                # Extract content from delta
+                local content
+                content=$(echo "$json_data" | jq -r '.choices[0].delta.content // empty')
+                if [[ -n "$content" ]]; then
+                    printf "%s" "$content"
+                    response_content+="$content"
+                fi
+            fi
+        done < <(curl -s -N "$BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
+
+        echo  # Final newline after streaming
+    else
+        # Non-streaming mode
+        local response
+        response=$(curl -s "$BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
+
+        response_content=$(echo "$response" | jq -r '.choices[0].message.content')
+        echo "$response_content"
+    fi
+
+    # Add assistant response to conversation
+    CONVERSATION+=("assistant" "$response_content")
 }
 
 main() {
@@ -95,7 +162,8 @@ main() {
         [[ -z "$message" ]] && break
 
         echo
-        echo "Assistant: $message"
+        echo -n "Assistant: "
+        oai_make_request "$message"
     done
 }
 
