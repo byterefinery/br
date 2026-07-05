@@ -256,10 +256,17 @@ EOF
 }
 
 read_file() {
-    local path="$1"
-    local start_line="${2:-1}"
-    local end_line="$3"
-    local append_loc="${4:-false}"
+    local args_json="$1"
+
+    local path start_line end_line append_loc
+    path=$(echo "$args_json" | jq -r '.path // empty')
+    if [[ -z "$path" ]]; then
+        echo "Error: 'path' is required for read_file"
+        return 1
+    fi
+    start_line=$(echo "$args_json" | jq -r '.start_line // 1')
+    end_line=$(echo "$args_json" | jq -r '.end_line // empty')
+    append_loc=$(echo "$args_json" | jq -r '.append_loc // false')
 
     if [[ ! -f "$path" ]]; then
         echo "Error: File not found: $path"
@@ -302,8 +309,15 @@ read_file() {
 }
 
 write_file() {
-    local path="$1"
-    local content="$2"
+    local args_json="$1"
+
+    local path content
+    path=$(echo "$args_json" | jq -r '.path // empty')
+    if [[ -z "$path" ]]; then
+        echo "Error: 'path' is required for write_file"
+        return 1
+    fi
+    content=$(echo "$args_json" | jq -r '.content // empty')
 
     local dir
     dir=$(dirname "$path")
@@ -316,8 +330,15 @@ write_file() {
 }
 
 edit_file() {
-    local path="$1"
-    local changes_json="$2"
+    local args_json="$1"
+
+    local path changes
+    path=$(echo "$args_json" | jq -r '.path // empty')
+    if [[ -z "$path" ]]; then
+        echo "Error: 'path' is required for edit_file"
+        return 1
+    fi
+    changes=$(echo "$args_json" | jq -c '.changes // empty')
 
     if [[ ! -f "$path" ]]; then
         echo "Error: File not found: $path"
@@ -327,11 +348,11 @@ edit_file() {
     mapfile -t lines < "$path"
 
     local num_changes
-    num_changes=$(echo "$changes_json" | jq 'length')
+    num_changes=$(echo "$changes" | jq 'length')
 
     # Sort changes by line_start descending to apply from bottom to top
     local sorted_changes
-    sorted_changes=$(echo "$changes_json" | jq -c 'sort_by(-.line_start)')
+    sorted_changes=$(echo "$changes" | jq -c 'sort_by(-.line_start)')
 
     for ((c=0; c<num_changes; c++)); do
         local mode line_start line_end content
@@ -391,9 +412,16 @@ edit_file() {
 }
 
 exec_shell_command() {
-    local command="$1"
-    local timeout="${2:-10}"
-    local max_output_size="${3:-16384}"
+    local args_json="$1"
+
+    local command timeout max_output_size
+    command=$(echo "$args_json" | jq -r '.command // empty')
+    if [[ -z "$command" ]]; then
+        echo "Error: 'command' is required for exec_shell_command"
+        return 1
+    fi
+    timeout=$(echo "$args_json" | jq -r '.timeout // 10')
+    max_output_size=$(echo "$args_json" | jq -r '.max_output_size // 16384')
 
     if [[ "$timeout" -gt 60 ]]; then
         timeout=60
@@ -419,7 +447,7 @@ execute_tool() {
     local tool_name="$1"
     local args_json="$2"
 
-    # Validate JSON arguments
+    # Validate JSON arguments before dispatching
     local jq_err
     if ! jq_err=$(echo "$args_json" | jq empty 2>&1); then
         echo "Error: Invalid JSON arguments: $jq_err"
@@ -427,49 +455,10 @@ execute_tool() {
     fi
 
     case "$tool_name" in
-        "read_file")
-            local path start_line end_line append_loc
-            path=$(echo "$args_json" | jq -r '.path // empty')
-            if [[ -z "$path" ]]; then
-                echo "Error: 'path' is required for read_file"
-                return 1
-            fi
-            start_line=$(echo "$args_json" | jq -r '.start_line // empty')
-            end_line=$(echo "$args_json" | jq -r '.end_line // empty')
-            append_loc=$(echo "$args_json" | jq -r '.append_loc // false')
-            read_file "$path" "$start_line" "$end_line" "$append_loc"
-            ;;
-        "write_file")
-            local path content
-            path=$(echo "$args_json" | jq -r '.path // empty')
-            if [[ -z "$path" ]]; then
-                echo "Error: 'path' is required for write_file"
-                return 1
-            fi
-            content=$(echo "$args_json" | jq -r '.content // empty')
-            write_file "$path" "$content"
-            ;;
-        "edit_file")
-            local path changes
-            path=$(echo "$args_json" | jq -r '.path // empty')
-            if [[ -z "$path" ]]; then
-                echo "Error: 'path' is required for edit_file"
-                return 1
-            fi
-            changes=$(echo "$args_json" | jq -c '.changes // empty')
-            edit_file "$path" "$changes"
-            ;;
-        "exec_shell_command")
-            local command timeout max_output_size
-            command=$(echo "$args_json" | jq -r '.command // empty')
-            if [[ -z "$command" ]]; then
-                echo "Error: 'command' is required for exec_shell_command"
-                return 1
-            fi
-            timeout=$(echo "$args_json" | jq -r '.timeout // 10')
-            max_output_size=$(echo "$args_json" | jq -r '.max_output_size // 16384')
-            exec_shell_command "$command" "$timeout" "$max_output_size"
-            ;;
+        "read_file")         read_file "$args_json" ;;
+        "write_file")        write_file "$args_json" ;;
+        "edit_file")         edit_file "$args_json" ;;
+        "exec_shell_command") exec_shell_command "$args_json" ;;
         *)
             echo "Error: Unknown tool $tool_name"
             return 1
