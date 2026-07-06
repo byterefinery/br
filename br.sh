@@ -532,24 +532,20 @@ exec_shell_command() {
 learn_about_skills() {
     cat <<'EOF'
 # Agent Skills System
-
 Skills are self-contained packages that give you specialized capabilities. They follow progressive disclosure — only load what you need for the current task.
-
 ## Strict Rules (Must Follow)
 - **NEVER** use `read_file` or `exec_shell_command` on anything inside `.agents/skills/`
 - **ALWAYS** use the dedicated skill tools to interact with skills:
-    - `list_skills`
-    - `load_skill`
-    - `read_skill_resource`
-    - `exec_skill_script`
-
+  - `list_skills`
+  - `load_skill`
+  - `read_skill_resource`
+  - `exec_skill_script`
 ## Directory Structure
 Each skill lives in `.agents/skills/<skill_name>/` and contains:
 - `SKILL.md` — Main file with instructions (required)
 - `references/` — Documents you can read when needed
 - `scripts/` — Scripts you can run using `exec_skill_script`
 - `assets/` — Templates and other files
-
 ## How to Work With Skills (Follow This Order)
 1. Call `list_skills` to see what skills are available
 2. Check if any skill's description matches the user's request
@@ -557,8 +553,6 @@ Each skill lives in `.agents/skills/<skill_name>/` and contains:
 4. Follow the steps in the loaded `SKILL.md` exactly
 5. Only call `read_skill_resource` when `SKILL.md` explicitly tells you to read something
 6. Use `exec_skill_script` to run scripts from the skill's `.agents/skills/<skill_name>/scripts/` directory
-
-Call `learn_about_skills` if you need a reminder of how the system works.
 EOF
 }
 
