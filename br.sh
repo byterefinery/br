@@ -160,169 +160,236 @@ read_env_vars() {
 
 get_tools_json() {
     cat <<'EOF'
-    [
-      {
-        "type": "function",
-        "function": {
-          "name": "read_file",
-          "description": "Read the contents of a file. Optionally specify a 1-based line range. If append_loc is true, each line is prefixed with its line number.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "path": { "type": "string", "description": "Path to the file" },
-              "start_line": { "type": "integer", "description": "First line to read, 1-based (default: 1)" },
-              "end_line": { "type": "integer", "description": "Last line to read, 1-based inclusive (default: end of file)" },
-              "append_loc": { "type": "boolean", "description": "Prefix each line with its line number" }
-            },
-            "required": ["path"]
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Read the contents of a file. Optionally specify a 1-based line range.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to the file"
+          },
+          "start_line": {
+            "type": "integer",
+            "description": "First line to read (1-based)"
+          },
+          "end_line": {
+            "type": "integer",
+            "description": "Last line to read (1-based, inclusive)"
+          },
+          "append_loc": {
+            "type": "boolean",
+            "description": "Prefix each line with its line number"
           }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "write_file",
-          "description": "Write content to a file, creating it (including parent directories) if it does not exist.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "path": { "type": "string", "description": "Path of the file to write" },
-              "content": { "type": "string", "description": "Content to write" }
-            },
-            "required": ["path", "content"]
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "edit_file",
-          "description": "Edit a file by applying a list of line-based changes.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "path": { "type": "string", "description": "Path to the file to edit" },
-              "changes": {
-                "type": "array",
-                "items": {
-                  "type": "object",
-                  "properties": {
-                    "mode": { "type": "string", "description": "\"replace\", \"delete\", or \"append\"" },
-                    "line_start": { "type": "integer", "description": "First line of the range (1-based); use -1 for end of file" },
-                    "line_end": { "type": "integer", "description": "Last line of the range (1-based, inclusive)" },
-                    "content": { "type": "string", "description": "Content to insert (must be empty string for delete mode)" }
-                  },
-                  "required": ["mode", "line_start", "line_end", "content"]
-                }
-              }
-            },
-            "required": ["path", "changes"]
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "exec_shell_command",
-          "description": "Execute a shell command and return its output (stdout and stderr combined).",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "command": { "type": "string", "description": "Shell command to execute" },
-              "timeout": { "type": "integer", "description": "Timeout in seconds (default 10, max 60)" },
-              "max_output_size": { "type": "integer", "description": "Maximum output size in bytes (default 16384)" }
-            },
-            "required": ["command"]
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "learn_about_skills",
-          "description": "Learn how the Agent Skills system works. Call this tool when you need to understand the skill system, progressive disclosure, or the correct way to interact with skills. IMPORTANT: Skills must ONLY be accessed using the dedicated skill tools (list_skills, load_skill, read_skill_resource, exec_skill_script). NEVER use read_file, exec_shell_command, or any other general tool to directly read or execute anything inside `.agents/skills/`. Always go through the dedicated skill tools.",
-          "parameters": {
-            "type": "object",
-            "properties": {}
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "list_skills",
-          "description": "List all available skills in the .agents/skills directory. Returns a JSON array with name, description, and skill_path for each skill. Use this to discover what skills are available before deciding which one to load.",
-          "parameters": {
-            "type": "object",
-            "properties": {}
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "load_skill",
-          "description": "Load a skill into context by reading its SKILL.md file. Use this when a user request matches a skill's purpose (after checking with list_skills). Only use the skill_name (the directory name), not the full path.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "skill_name": {
-                "type": "string",
-                "description": "The name of the skill (directory name under `.agents/skills/`, e.g. 'pdf-processing' or 'data-analysis')"
-              }
-            },
-            "required": ["skill_name"]
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "read_skill_resource",
-          "description": "Read a resource file belonging to a specific skill (e.g. references/, assets/, or scripts/ files). The resource_path must be relative to the skill root (example: 'references/api-errors.md' or 'scripts/helper.py'). Never use read_file for skill resources — always use this tool.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "skill_name": {
-                "type": "string",
-                "description": "The name of the skill (directory name under `.agents/skills/`)"
-              },
-              "resource_path": {
-                "type": "string",
-                "description": "Relative path inside the skill directory (e.g. 'references/01-intro.md' or 'scripts/process_data.py')"
-              }
-            },
-            "required": ["skill_name", "resource_path"]
-          }
-        }
-      },
-      {
-        "type": "function",
-        "function": {
-          "name": "exec_skill_script",
-          "description": "Execute a script that belongs to a specific skill. The script must be located in the skill's scripts directory. Use this instead of exec_shell_command when running skill-provided scripts.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "skill_name": {
-                "type": "string",
-                "description": "The name of the skill (directory name under `.agents/skills/`)"
-              },
-              "script_path": {
-                "type": "string",
-                "description": "Path to the script relative to the skill's scripts directory (e.g. 'analyze.sh' or 'generate_report.sh')"
-              },
-              "args": {
-                "type": "array",
-                "items": { "type": "string" },
-                "description": "Optional list of arguments to pass to the script (will be passed as command line arguments)"
-              }
-            },
-            "required": ["skill_name", "script_path"]
-          }
-        }
+        },
+        "required": [
+          "path"
+        ]
       }
-    ]
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_file",
+      "description": "Write content to a file, creating parent directories if needed.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path of the file to write"
+          },
+          "content": {
+            "type": "string",
+            "description": "Content to write"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit_file",
+      "description": "Edit a file using line-based changes.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Path to the file"
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "description": "\"replace\", \"delete\", or \"append\""
+                },
+                "line_start": {
+                  "type": "integer",
+                  "description": "Start line (1-based). Use -1 for end of file"
+                },
+                "line_end": {
+                  "type": "integer",
+                  "description": "End line (1-based)"
+                },
+                "content": {
+                  "type": "string",
+                  "description": "Content to insert (empty string for delete)"
+                }
+              },
+              "required": [
+                "mode",
+                "line_start",
+                "line_end",
+                "content"
+              ]
+            }
+          }
+        },
+        "required": [
+          "path",
+          "changes"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "exec_shell_command",
+      "description": "Execute a shell command.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string",
+            "description": "Shell command to run"
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "Timeout in seconds (default: 10)"
+          },
+          "max_output_size": {
+            "type": "integer",
+            "description": "Max output size in bytes (default: 16384)"
+          }
+        },
+        "required": [
+          "command"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "learn_about_skills",
+      "description": "Learn how the Agent Skills system works and the correct way to use skill tools. Call this if you are unsure about the process.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_skills",
+      "description": "List all available skills. Returns name, description, and path for each skill.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "load_skill",
+      "description": "Load a skill's SKILL.md into context. Use after checking with list_skills.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skill_name": {
+            "type": "string",
+            "description": "Skill directory name under .agents/skills/ (e.g. 'pdf-processing')"
+          }
+        },
+        "required": [
+          "skill_name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_skill_resource",
+      "description": "Read a file from a skill's references/, scripts/, or assets/ directory. resource_path is relative to the skill root.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skill_name": {
+            "type": "string",
+            "description": "Skill directory name"
+          },
+          "resource_path": {
+            "type": "string",
+            "description": "Relative path (e.g. 'references/01-api.md' or 'scripts/helper.sh')"
+          }
+        },
+        "required": [
+          "skill_name",
+          "resource_path"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "exec_skill_script",
+      "description": "Execute a script from a skill's `.agents/skills/<skill_name>/scripts/` directory. Use this instead of exec_shell_command for skill scripts.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skill_name": {
+            "type": "string",
+            "description": "Skill directory name under `.agents/skills/`"
+          },
+          "script_path": {
+            "type": "string",
+            "description": "Script name inside the skill's `.agents/skills/<skill_name>/scripts/` directory (e.g. 'process.sh')"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional arguments to pass to the script"
+          }
+        },
+        "required": [
+          "skill_name",
+          "script_path"
+        ]
+      }
+    }
+  }
+]
 EOF
 }
 
@@ -534,30 +601,32 @@ learn_about_skills() {
     cat <<'EOF'
 # Agent Skills System
 
-## Overview
-Skills are self-contained capability packages that agents load on-demand to execute specific tasks using specialized workflows, scripts, and documentation. They follow a progressive disclosure pattern: only load what's needed for the current task.
+Skills are self-contained packages that give you specialized capabilities. They follow progressive disclosure — only load what you need for the current task.
+
+## Strict Rules (Must Follow)
+- **NEVER** use `read_file` or `exec_shell_command` on anything inside `.agents/skills/`
+- **ALWAYS** use the dedicated skill tools to interact with skills:
+    - `list_skills`
+    - `load_skill`
+    - `read_skill_resource`
+    - `exec_skill_script`
 
 ## Directory Structure
-Each skill is a directory under `.agents/skills/` containing:
-- `SKILL.md` (required): The main skill definition file
-  - YAML frontmatter with `name` and `description` fields
-  - Markdown body with detailed instructions for the agent
-- `references/` (optional): Reference documents loaded when needed
-- `scripts/` (optional): Executable scripts the agent can run
-- `assets/` (optional): Static assets like templates or config files
+Each skill lives in `.agents/skills/<skill_name>/` and contains:
+- `SKILL.md` — Main file with instructions (required)
+- `references/` — Documents you can read when needed
+- `scripts/` — Scripts you can run using `exec_skill_script`
+- `assets/` — Templates and other files
 
-## Workflow
-1. **Discover**: Use `list_skills` to see available skills and their descriptions
-2. **Evaluate**: Match the user's request against skill descriptions
-3. **Load**: Use `load_skill` to read the skill's `SKILL.md` into context
-4. **Access Resources**: Use `read_skill_resource` to read reference docs or other files
-5. **Execute Scripts**: Use `exec_skill_script` to run scripts from the skill relative to skill's `scripts/` directory
+## How to Work With Skills (Follow This Order)
+1. Call `list_skills` to see what skills are available
+2. Check if any skill's description matches the user's request
+3. If yes, call `load_skill(skill_name)` to load its instructions
+4. Follow the steps in the loaded `SKILL.md` exactly
+5. Only call `read_skill_resource` when `SKILL.md` explicitly tells you to read something
+6. Use `exec_skill_script` to run scripts from the skill's `.agents/skills/<skill_name>/scripts/` directory
 
-## Critical Rules
-- NEVER use `read_file`, `exec_shell_command`, or any other general tool to directly access files inside `.agents/skills/`
-- ALWAYS use the dedicated skill tools: `list_skills`, `load_skill`, `read_skill_resource`, `exec_skill_script`
-- Only load skills that are relevant to the current task
-- Read reference files only when the SKILL.md instructions indicate they're needed
+Call `learn_about_skills` if you need a reminder of how the system works.
 EOF
 }
 
