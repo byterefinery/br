@@ -88,10 +88,6 @@ SESSION_AFFINITY=""
 GLOBAL_RETRY_COUNT=1
 GLOBAL_RETRY_DELAY=2
 
-# Global skill data (populated by load_skills)
-SKILL_USER_CONTENT=""
-SKILL_ASSISTANT_REPLY=""
-
 # Print configuration and session headers
 print_config_and_headers() {
     local masked_api_key
@@ -164,183 +160,174 @@ read_env_vars() {
 
 get_tools_json() {
     cat <<'EOF'
-[
-  {
-    "type": "function",
-    "function": {
-      "name": "read_file",
-      "description": "Read the contents of a file. Optionally specify a 1-based line range. If append_loc is true, each line is prefixed with its line number (e.g. \"1→ ...\").",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {"type": "string", "description": "Path to the file"},
-          "start_line": {"type": "integer", "description": "First line to read, 1-based (default: 1)"},
-          "end_line": {"type": "integer", "description": "Last line to read, 1-based inclusive (default: end of file)"},
-          "append_loc": {"type": "boolean", "description": "Prefix each line with its line number"}
-        },
-        "required": ["path"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "write_file",
-      "description": "Write content to a file, creating it (including parent directories) if it does not exist. May use with edit_file for more complex edits.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {"type": "string", "description": "Path of the file to write"},
-          "content": {"type": "string", "description": "Content to write"}
-        },
-        "required": ["path", "content"]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "edit_file",
-      "description": "Edit a file by applying a list of line-based changes. Each change targets a 1-based inclusive line range and has a mode: \"replace\" (replace lines with content), \"delete\" (remove lines, content must be empty string), \"append\" (insert content after line_end). Set line_start to -1 to target the end of file (line_end is ignored in that case). Changes must not overlap. They are applied in reverse line order automatically.",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "path": {"type": "string", "description": "Path to the file to edit"},
-          "changes": {
-            "type": "array",
-            "description": "List of changes to apply",
-            "items": {
-              "type": "object",
-              "properties": {
-                "mode": {"type": "string", "description": "\"replace\", \"delete\", or \"append\""},
-                "line_start": {"type": "integer", "description": "First line of the range (1-based); use -1 for end of file"},
-                "line_end": {"type": "integer", "description": "Last line of the range (1-based, inclusive); ignored when line_start is -1"},
-                "content": {"type": "string", "description": "Content to insert; must be empty string for delete mode"}
-              },
-              "required": ["mode", "line_start", "line_end", "content"]
-            }
+    [
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "description": "Read the contents of a file. Optionally specify a 1-based line range. If append_loc is true, each line is prefixed with its line number.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "description": "Path to the file" },
+              "start_line": { "type": "integer", "description": "First line to read, 1-based (default: 1)" },
+              "end_line": { "type": "integer", "description": "Last line to read, 1-based inclusive (default: end of file)" },
+              "append_loc": { "type": "boolean", "description": "Prefix each line with its line number" }
+            },
+            "required": ["path"]
           }
-        },
-        "required": ["path", "changes"]
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "write_file",
+          "description": "Write content to a file, creating it (including parent directories) if it does not exist.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "description": "Path of the file to write" },
+              "content": { "type": "string", "description": "Content to write" }
+            },
+            "required": ["path", "content"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "edit_file",
+          "description": "Edit a file by applying a list of line-based changes.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string", "description": "Path to the file to edit" },
+              "changes": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "mode": { "type": "string", "description": "\"replace\", \"delete\", or \"append\"" },
+                    "line_start": { "type": "integer", "description": "First line of the range (1-based); use -1 for end of file" },
+                    "line_end": { "type": "integer", "description": "Last line of the range (1-based, inclusive)" },
+                    "content": { "type": "string", "description": "Content to insert (must be empty string for delete mode)" }
+                  },
+                  "required": ["mode", "line_start", "line_end", "content"]
+                }
+              }
+            },
+            "required": ["path", "changes"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "exec_shell_command",
+          "description": "Execute a shell command and return its output (stdout and stderr combined).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": { "type": "string", "description": "Shell command to execute" },
+              "timeout": { "type": "integer", "description": "Timeout in seconds (default 10, max 60)" },
+              "max_output_size": { "type": "integer", "description": "Maximum output size in bytes (default 16384)" }
+            },
+            "required": ["command"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "learn_about_skills",
+          "description": "Learn how the Agent Skills system works. Call this tool when you need to understand the skill system, progressive disclosure, or the correct way to interact with skills. IMPORTANT: Skills must ONLY be accessed using the dedicated skill tools (list_skills, load_skill, read_skill_resource, exec_skill_script). NEVER use read_file, exec_shell_command, or any other general tool to directly read or execute anything inside `.agents/skills/`. Always go through the dedicated skill tools.",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "list_skills",
+          "description": "List all available skills in the .agents/skills directory. Returns a JSON array with name, description, and skill_path for each skill. Use this to discover what skills are available before deciding which one to load.",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "load_skill",
+          "description": "Load a skill into context by reading its SKILL.md file. Use this when a user request matches a skill's purpose (after checking with list_skills). Only use the skill_name (the directory name), not the full path.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "skill_name": {
+                "type": "string",
+                "description": "The name of the skill (directory name under `.agents/skills/`, e.g. 'pdf-processing' or 'data-analysis')"
+              }
+            },
+            "required": ["skill_name"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "read_skill_resource",
+          "description": "Read a resource file belonging to a specific skill (e.g. references/, assets/, or scripts/ files). The resource_path must be relative to the skill root (example: 'references/api-errors.md' or 'scripts/helper.py'). Never use read_file for skill resources — always use this tool.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "skill_name": {
+                "type": "string",
+                "description": "The name of the skill (directory name under `.agents/skills/`)"
+              },
+              "resource_path": {
+                "type": "string",
+                "description": "Relative path inside the skill directory (e.g. 'references/01-intro.md' or 'scripts/process_data.py')"
+              }
+            },
+            "required": ["skill_name", "resource_path"]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "exec_skill_script",
+          "description": "Execute a script that belongs to a specific skill. The script must be located in the skill's scripts directory. Use this instead of exec_shell_command when running skill-provided scripts.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "skill_name": {
+                "type": "string",
+                "description": "The name of the skill (directory name under `.agents/skills/`)"
+              },
+              "script_path": {
+                "type": "string",
+                "description": "Path to the script relative to the skill's scripts directory (e.g. 'analyze.sh' or 'generate_report.sh')"
+              },
+              "args": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Optional list of arguments to pass to the script (will be passed as command line arguments)"
+              }
+            },
+            "required": ["skill_name", "script_path"]
+          }
+        }
       }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "exec_shell_command",
-      "description": "Execute a shell command and return its output (stdout and stderr combined).",
-      "parameters": {
-        "type": "object",
-        "properties": {
-          "command": {"type": "string", "description": "Shell command to execute"},
-          "timeout": {"type": "integer", "description": "Timeout in seconds (default 10, max 60)"},
-          "max_output_size": {"type": "integer", "description": "Maximum output size in bytes (default 16384)"}
-        },
-        "required": ["command"]
-      }
-    }
-  }
-]
+    ]
 EOF
-}
-
-load_skills() {
-    local skills_dir=".agents/skills"
-
-    SKILL_USER_CONTENT=""
-    SKILL_ASSISTANT_REPLY=""
-
-    if [[ ! -d "$skills_dir" ]]; then
-        return 0
-    fi
-
-    local skills_json="{}"
-    local -a skill_paths=()
-
-    # Find every SKILL.md inside a subdirectory of .agents/skills
-    while IFS= read -r -d '' skill_file; do
-        skill_paths+=("$skill_file")
-
-        # Extract YAML frontmatter (lines between first and second ---)
-        local frontmatter
-        frontmatter=$(awk '
-            /^---[[:space:]]*$/ {
-                if (in_fm) exit
-                in_fm = 1
-                next
-            }
-            in_fm { print }
-        ' "$skill_file" 2>/dev/null)
-
-        # Parse name and description from frontmatter
-        local name desc
-        name=$(echo "$frontmatter" \
-               | grep '^name:' | head -1 \
-               | sed 's/^name:[[:space:]]*//' \
-               | sed "s/^['\"]//;s/['\"]$//" \
-               | tr -d '\r')
-        desc=$(echo "$frontmatter" \
-               | grep '^description:' | head -1 \
-               | sed 's/^description:[[:space:]]*//' \
-               | sed "s/^['\"]//;s/['\"]$//" \
-               | tr -d '\r')
-
-        if [[ -n "$name" ]]; then
-            skills_json=$(echo "$skills_json" \
-                | jq --arg n "$name" --arg d "${desc:-}" \
-                '. + {($n): $d}')
-        fi
-    done < <(find "$skills_dir" -mindepth 2 -name "SKILL.md" -print0 2>/dev/null)
-
-    local num_skills
-    num_skills=$(echo "$skills_json" | jq 'length')
-
-    if [[ "$num_skills" -gt 0 ]]; then
-        local skills_block
-        skills_block=$(echo "$skills_json" \
-            | jq -r 'to_entries | map("\"\(.key)\": \(.value | tojson)") | join(", ")')
-
-        # Build user message content (same content as previous system message)
-        SKILL_USER_CONTENT=""
-        SKILL_USER_CONTENT+="Skills are self-contained capability packages that agents load on-demand and progressively to execute specific tasks using specialized workflows, scripts, and documentation. "
-        SKILL_USER_CONTENT+="They are defined as directories centered around a required SKILL.md file, which uses YAML frontmatter for essential metadata (like name and description) and a Markdown body for detailed instructions. "
-        SKILL_USER_CONTENT+="Optional subdirectories can also be included to house helper scripts, references, and assets that the agent only pulls in when actively needed for the task."
-        SKILL_USER_CONTENT+=$'\n'
-
-        SKILL_USER_CONTENT+=$'Your skills can be found in local `.agents/skills` directory.\n'
-        SKILL_USER_CONTENT+="Your available skills (where key is skill name and value is skill description) are: {"
-        SKILL_USER_CONTENT+="$skills_block"
-        SKILL_USER_CONTENT+=$'}\n'
-
-        SKILL_USER_CONTENT+=$'When you see `/skill:<SKILL_NAME> <MESSAGE>`, read file `.agents/skills/<SKILL_NAME>/SKILL.md`. Read all <SKILL_NAME> reference files. List directory `.agents/skills/<SKILL_NAME>/scripts`. Do not read script files. If scripts are mentioned in skill file, see how scripts are used, and how <MESSAGE> should be passed to them.\n'
-
-        # Build simulated assistant reply listing skill file paths
-        SKILL_ASSISTANT_REPLY="Available skills are:"
-        for path in "${skill_paths[@]}"; do
-            SKILL_ASSISTANT_REPLY+=$'\n'"- $path"
-        done
-    fi
 }
 
 init_conversation() {
     CONVERSATION=()
-
-    load_skills
-
-    if [[ -n "$SKILL_USER_CONTENT" ]]; then
-        # Add user message with skills content (instead of system message)
-        local user_msg
-        user_msg=$(jq -n --arg content "$SKILL_USER_CONTENT" \
-            '{role: "user", content: $content}')
-        CONVERSATION+=("$user_msg")
-
-        # Add simulated assistant reply
-        local assistant_msg
-        assistant_msg=$(jq -n --arg content "$SKILL_ASSISTANT_REPLY" \
-            '{role: "assistant", content: $content}')
-        CONVERSATION+=("$assistant_msg")
-    fi
 }
 
 read_file() {
@@ -543,6 +530,248 @@ exec_shell_command() {
     echo "$output"
 }
 
+learn_about_skills() {
+    cat <<'EOF'
+# Agent Skills System
+
+## Overview
+Skills are self-contained capability packages that agents load on-demand to execute specific tasks using specialized workflows, scripts, and documentation. They follow a progressive disclosure pattern: only load what's needed for the current task.
+
+## Directory Structure
+Each skill is a directory under `.agents/skills/` containing:
+- `SKILL.md` (required): The main skill definition file
+  - YAML frontmatter with `name` and `description` fields
+  - Markdown body with detailed instructions for the agent
+- `references/` (optional): Reference documents loaded when needed
+- `scripts/` (optional): Executable scripts the agent can run
+- `assets/` (optional): Static assets like templates or config files
+
+## Workflow
+1. **Discover**: Use `list_skills` to see available skills and their descriptions
+2. **Evaluate**: Match the user's request against skill descriptions
+3. **Load**: Use `load_skill` to read the skill's `SKILL.md` into context
+4. **Access Resources**: Use `read_skill_resource` to read reference docs or other files
+5. **Execute Scripts**: Use `exec_skill_script` to run scripts from the skill relative to skill's `scripts/` directory
+
+## Critical Rules
+- NEVER use `read_file`, `exec_shell_command`, or any other general tool to directly access files inside `.agents/skills/`
+- ALWAYS use the dedicated skill tools: `list_skills`, `load_skill`, `read_skill_resource`, `exec_skill_script`
+- Only load skills that are relevant to the current task
+- Read reference files only when the SKILL.md instructions indicate they're needed
+EOF
+}
+
+list_skills() {
+    local skills_dir=".agents/skills"
+
+    if [[ ! -d "$skills_dir" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    local result="[]"
+
+    while IFS= read -r -d '' skill_file; do
+        local skill_dir
+        skill_dir=$(dirname "$skill_file")
+        local skill_name
+        skill_name=$(basename "$skill_dir")
+
+        # Extract YAML frontmatter (lines between first and second ---)
+        local frontmatter
+        frontmatter=$(awk '
+            /^---[[:space:]]*$/ {
+                if (in_fm) exit
+                in_fm = 1
+                next
+            }
+            in_fm { print }
+        ' "$skill_file" 2>/dev/null)
+
+        # Parse name and description from frontmatter
+        local name desc
+        name=$(echo "$frontmatter" \
+               | grep '^name:' | head -1 \
+               | sed 's/^name:[[:space:]]*//' \
+               | sed "s/^['\"]//;s/['\"]$//" \
+               | tr -d '\r')
+        desc=$(echo "$frontmatter" \
+               | grep '^description:' | head -1 \
+               | sed 's/^description:[[:space:]]*//' \
+               | sed "s/^['\"]//;s/['\"]$//" \
+               | tr -d '\r')
+
+        # Use directory name if name not in frontmatter
+        [[ -z "$name" ]] && name="$skill_name"
+        [[ -z "$desc" ]] && desc="(no description)"
+
+        result=$(echo "$result" | jq \
+            --arg name "$name" \
+            --arg desc "$desc" \
+            --arg path "$skill_dir" \
+            '. + [{"name": $name, "description": $desc, "skill_path": $path}]')
+    done < <(find "$skills_dir" -mindepth 2 -name "SKILL.md" -print0 2>/dev/null)
+
+    echo "$result"
+}
+
+load_skill() {
+    local args_json="$1"
+
+    local skill_name
+    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
+
+    if [[ -z "$skill_name" ]]; then
+        echo "Error: 'skill_name' is required for load_skill"
+        return 1
+    fi
+
+    # Basic path traversal check
+    if [[ "$skill_name" == *..* ]]; then
+        echo "Error: Path traversal is not allowed"
+        return 1
+    fi
+
+    local skill_path=".agents/skills/$skill_name/SKILL.md"
+
+    if [[ ! -f "$skill_path" ]]; then
+        echo "Error: Skill not found: $skill_name (looked for $skill_path)"
+        return 1
+    fi
+
+    cat "$skill_path"
+}
+
+read_skill_resource() {
+    local args_json="$1"
+
+    local skill_name resource_path
+    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
+    resource_path=$(echo "$args_json" | jq -r '.resource_path // empty')
+
+    if [[ -z "$skill_name" ]]; then
+        echo "Error: 'skill_name' is required for read_skill_resource"
+        return 1
+    fi
+
+    if [[ -z "$resource_path" ]]; then
+        echo "Error: 'resource_path' is required for read_skill_resource"
+        return 1
+    fi
+
+    # Basic path traversal check
+    if [[ "$skill_name" == *..* || "$resource_path" == *..* ]]; then
+        echo "Error: Path traversal is not allowed"
+        return 1
+    fi
+
+    local skill_dir=".agents/skills/$skill_name"
+    local full_path="$skill_dir/$resource_path"
+
+    # Verify the path stays within the skill directory
+    if [[ -d "$skill_dir" ]]; then
+        local resolved_path resolved_skill_dir
+        resolved_path=$(realpath -m "$full_path" 2>/dev/null)
+        resolved_skill_dir=$(realpath -m "$skill_dir" 2>/dev/null)
+
+        if [[ -n "$resolved_path" && -n "$resolved_skill_dir" ]]; then
+            if [[ "$resolved_path" != "$resolved_skill_dir"* ]]; then
+                echo "Error: Resource path must be within the skill directory"
+                return 1
+            fi
+        fi
+    fi
+
+    if [[ ! -f "$full_path" ]]; then
+        echo "Error: Resource not found: $resource_path in skill $skill_name (looked for $full_path)"
+        return 1
+    fi
+
+    cat "$full_path"
+}
+
+exec_skill_script() {
+    local args_json="$1"
+
+    local skill_name script_path
+    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
+    script_path=$(echo "$args_json" | jq -r '.script_path // empty')
+
+    if [[ -z "$skill_name" ]]; then
+        echo "Error: 'skill_name' is required for exec_skill_script"
+        return 1
+    fi
+
+    if [[ -z "$script_path" ]]; then
+        echo "Error: 'script_path' is required for exec_skill_script"
+        return 1
+    fi
+
+    # Basic path traversal check
+    if [[ "$skill_name" == *..* || "$script_path" == *..* ]]; then
+        echo "Error: Path traversal is not allowed"
+        return 1
+    fi
+
+    local skill_dir=".agents/skills/$skill_name"
+    local scripts_dir="$skill_dir/scripts"
+    local full_path="$scripts_dir/$script_path"
+
+    # Verify the path stays within the skill's scripts directory
+    if [[ -d "$scripts_dir" ]]; then
+        local resolved_path resolved_scripts_dir
+        resolved_path=$(realpath -m "$full_path" 2>/dev/null)
+        resolved_scripts_dir=$(realpath -m "$scripts_dir" 2>/dev/null)
+
+        if [[ -n "$resolved_path" && -n "$resolved_scripts_dir" ]]; then
+            if [[ "$resolved_path" != "$resolved_scripts_dir"* ]]; then
+                echo "Error: Script path must be within the skill's scripts/ directory"
+                return 1
+            fi
+        fi
+    fi
+
+    if [[ ! -f "$full_path" ]]; then
+        echo "Error: Script not found: $script_path in skill $skill_name (looked for $full_path)"
+        return 1
+    fi
+
+    # Make script executable if needed
+    if [[ ! -x "$full_path" ]]; then
+        chmod +x "$full_path" 2>/dev/null
+    fi
+
+    # Build command with optional arguments
+    local -a cmd_args=("$full_path")
+    local num_args
+    num_args=$(echo "$args_json" | jq '(.args // []) | length')
+
+    for ((i=0; i<num_args; i++)); do
+        local arg
+        arg=$(echo "$args_json" | jq -r ".args[$i]")
+        cmd_args+=("$arg")
+    done
+
+    # Execute with timeout and output size limits
+    local timeout=60
+    local max_output_size=65536
+
+    local output
+    output=$(timeout "$timeout" "${cmd_args[@]}" 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -eq 124 ]]; then
+        echo "Error: Script timed out after ${timeout} seconds."
+        return 1
+    fi
+
+    if [[ ${#output} -gt $max_output_size ]]; then
+        output="${output:0:$max_output_size}... [truncated]"
+    fi
+
+    echo "$output"
+}
+
 execute_tool() {
     local tool_name="$1"
     local args_json="$2"
@@ -555,10 +784,15 @@ execute_tool() {
     fi
 
     case "$tool_name" in
-        "read_file")         read_file "$args_json" ;;
-        "write_file")        write_file "$args_json" ;;
-        "edit_file")         edit_file "$args_json" ;;
-        "exec_shell_command") exec_shell_command "$args_json" ;;
+        "read_file")           read_file "$args_json" ;;
+        "write_file")          write_file "$args_json" ;;
+        "edit_file")           edit_file "$args_json" ;;
+        "exec_shell_command")  exec_shell_command "$args_json" ;;
+        "learn_about_skills")  learn_about_skills ;;
+        "list_skills")         list_skills ;;
+        "load_skill")          load_skill "$args_json" ;;
+        "read_skill_resource") read_skill_resource "$args_json" ;;
+        "exec_skill_script")   exec_skill_script "$args_json" ;;
         *)
             echo "Error: Unknown tool $tool_name"
             return 1
