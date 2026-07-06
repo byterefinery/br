@@ -428,6 +428,11 @@ edit_file() {
     fi
     changes=$(echo "$args_json" | jq -c '.changes // empty')
 
+    if [[ -z "$changes" || "$changes" == "null" ]]; then
+        echo "Error: 'changes' is required for edit_file"
+        return 1
+    fi
+
     if [[ ! -f "$path" ]]; then
         echo "Error: File not found: $path"
         return 1
@@ -511,8 +516,15 @@ exec_shell_command() {
     timeout=$(echo "$args_json" | jq -r '.timeout // 10')
     max_output_size=$(echo "$args_json" | jq -r '.max_output_size // 16384')
 
+    if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
+        timeout=10
+    fi
     if [[ "$timeout" -gt 60 ]]; then
         timeout=60
+    fi
+
+    if ! [[ "$max_output_size" =~ ^[0-9]+$ ]]; then
+        max_output_size=16384
     fi
 
     local output
@@ -615,6 +627,7 @@ oai_make_request() {
 
                 local DONE_RECEIVED=false
                 exec 3< "$tmp_pipe"
+                local sse_buffer=""
                 while true; do
                     # Check for ESC key (Interrupt)
                     if IFS= read -t 0.001 -n 1 key 2>/dev/null; then
@@ -624,106 +637,136 @@ oai_make_request() {
                         fi
                     fi
 
-                    # Check for data from curl
-                    if IFS= read -t 0.01 -r line <&3; then
-                        : # Data received
-                    elif [[ -n "$line" ]]; then
-                        : # EOF with partial line
-                    else
-                        # No data from curl
-                        if ! kill -0 "$CURL_PID" 2>/dev/null; then
-                            break # curl exited
-                        fi
+                    # Read from curl stream (non-blocking with short timeout)
+                    local partial=""
+                    if IFS= read -t 0.1 -r partial <&3; then
+                        # Full line received
+                        sse_buffer+="$partial"$'\n'
+                    elif [[ -n "$partial" ]]; then
+                        # Partial line received due to timeout
+                        sse_buffer+="$partial"
                         continue
+                    else
+                        # No data received
+                        if ! kill -0 "$CURL_PID" 2>/dev/null; then
+                            # curl has exited
+                            if [[ -z "$sse_buffer" ]]; then
+                                break # No more data to process
+                            fi
+                            # Append a newline to flush any remaining buffer
+                            sse_buffer+=$'\n'
+                        else
+                            continue # Wait for more data
+                        fi
                     fi
 
-                    [[ -z "$line" ]] && continue
-                    if [[ "$line" == "data: [DONE]" ]]; then
-                        DONE_RECEIVED=true
-                        break
-                    fi
+                    # Process all complete lines in sse_buffer
+                    while [[ "$sse_buffer" == *$'\n'* ]]; do
+                        local line="${sse_buffer%%$'\n'*}"
+                        sse_buffer="${sse_buffer#*$'\n'}"
 
-                    if [[ "$line" =~ ^data:\ (.+)$ ]]; then
-                        local json_data="${BASH_REMATCH[1]}"
+                        # Strip trailing carriage return if present
+                        line="${line%$'\r'}"
 
-                        # Check for API error
-                        local err_msg
-                        err_msg=$(echo "$json_data" | jq -r '.error.message // empty')
-                        if [[ -n "$err_msg" ]]; then
-                            api_error="$err_msg"
+                        [[ -z "$line" ]] && continue
+                        if [[ "$line" == "data: [DONE]" ]]; then
+                            DONE_RECEIVED=true
                             break
                         fi
 
-                        # Process reasoning content
-                        local reasoning_delta
-                        reasoning_delta=$(echo "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty'; printf x)
-                        reasoning_delta="${reasoning_delta%x}"
-                        if [[ -n "$reasoning_delta" ]]; then
-                            if [[ "$reasoning_started" == "false" ]]; then
-                                printf "%s[THINK]" "${COLOR_DIM}"
-                                reasoning_started=true
-                            fi
-                            printf "%s" "$reasoning_delta"
-                            reasoning_content+="$reasoning_delta"
-                        fi
+                        if [[ "$line" =~ ^data:\ (.+)$ ]]; then
+                            local json_data="${BASH_REMATCH[1]}"
 
-                        # Process response content
-                        local content
-                        content=$(echo "$json_data" | jq -j '.choices[0].delta.content // empty'; printf x)
-                        content="${content%x}"
-                        if [[ -n "$content" ]]; then
-                            if [[ "$reasoning_started" == "true" ]]; then
-                                printf "[/THINK]%s\n\n" "${COLOR_RESET}"
-                                reasoning_started=false
-                                # Strip leading newlines to avoid excessive blank lines
-                                while [[ "$content" =~ ^$'\n' ]]; do
-                                    content="${content:1}"
+                            # Check for API error
+                            local err_msg
+                            err_msg=$(echo "$json_data" | jq -r '.error.message // empty' 2>/dev/null)
+                            if [[ -n "$err_msg" ]]; then
+                                api_error="$err_msg"
+                                break
+                            fi
+
+                            # Process reasoning content
+                            local reasoning_delta
+                            reasoning_delta=$(echo "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; printf x)
+                            reasoning_delta="${reasoning_delta%x}"
+                            if [[ -n "$reasoning_delta" ]]; then
+                                if [[ "$reasoning_started" == "false" ]]; then
+                                    printf "%s[THINK]" "${COLOR_DIM}"
+                                    reasoning_started=true
+                                fi
+                                printf "%s" "$reasoning_delta"
+                                reasoning_content+="$reasoning_delta"
+                            fi
+
+                            # Process response content
+                            local content
+                            content=$(echo "$json_data" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; printf x)
+                            content="${content%x}"
+                            if [[ -n "$content" ]]; then
+                                if [[ "$reasoning_started" == "true" ]]; then
+                                    printf "[/THINK]%s\n\n" "${COLOR_RESET}"
+                                    reasoning_started=false
+                                    # Strip leading newlines to avoid excessive blank lines
+                                    while [[ "$content" =~ ^$'\n' ]]; do
+                                        content="${content:1}"
+                                    done
+                                fi
+                                if [[ -n "$content" ]]; then
+                                    printf "%s" "$content"
+                                    response_content+="$content"
+                                fi
+                            fi
+
+                            # Process tool calls (accumulate fragments by index)
+                            local tc_count
+                            tc_count=$(echo "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length' 2>/dev/null)
+                            if [[ "$tc_count" =~ ^[0-9]+$ ]] && [[ "$tc_count" -gt 0 ]]; then
+                                if [[ "$reasoning_started" == "true" ]]; then
+                                    printf "[/THINK]%s\n\n" "${COLOR_RESET}"
+                                    reasoning_started=false
+                                fi
+                                has_tool_calls=true
+                                for ((i=0; i<tc_count; i++)); do
+                                    local idx
+                                    idx=$(echo "$json_data" | jq -r ".choices[0].delta.tool_calls[$i].index" 2>/dev/null)
+                                    if [[ -z "$idx" || "$idx" == "null" ]]; then
+                                        continue
+                                    fi
+
+                                    if [[ -z "${current_tool_calls[$idx]}" ]]; then
+                                        current_tool_calls[$idx]="{}"
+                                    fi
+
+                                    local delta_tc
+                                    delta_tc=$(echo "$json_data" | jq -c ".choices[0].delta.tool_calls[$i]" 2>/dev/null)
+                                    local merged_tc
+                                    merged_tc=$(echo "${current_tool_calls[$idx]}" "$delta_tc" | jq -s '
+                                        .[0] as $base | .[1] as $delta |
+                                        $base |
+                                        if $delta.id then .id = $delta.id else . end |
+                                        if $delta.type then .type = $delta.type else . end |
+                                        if $delta.function then
+                                            .function = (
+                                                (.function // {}) |
+                                                if $delta.function.name then .name = $delta.function.name else . end |
+                                                if $delta.function.arguments then
+                                                    .arguments = ((.arguments // "") + $delta.function.arguments)
+                                                else . end
+                                            )
+                                        else . end
+                                    ' 2>/dev/null)
+                                    if [[ -n "$merged_tc" ]]; then
+                                        current_tool_calls[$idx]="$merged_tc"
+                                    fi
                                 done
                             fi
-                            if [[ -n "$content" ]]; then
-                                printf "%s" "$content"
-                                response_content+="$content"
-                            fi
+                        elif [[ "$line" =~ ^[0-9]{3}$ ]]; then
+                            http_code="$line"
                         fi
+                    done # End of processing complete lines
 
-                        # Process tool calls (accumulate fragments by index)
-                        local tc_count
-                        tc_count=$(echo "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length')
-                        if [[ "$tc_count" -gt 0 ]]; then
-                            if [[ "$reasoning_started" == "true" ]]; then
-                                printf "[/THINK]%s\n\n" "${COLOR_RESET}"
-                                reasoning_started=false
-                            fi
-                            has_tool_calls=true
-                            for ((i=0; i<tc_count; i++)); do
-                                local idx
-                                idx=$(echo "$json_data" | jq -r ".choices[0].delta.tool_calls[$i].index")
-
-                                if [[ -z "${current_tool_calls[$idx]}" ]]; then
-                                    current_tool_calls[$idx]="{}"
-                                fi
-
-                                local delta_tc
-                                delta_tc=$(echo "$json_data" | jq -c ".choices[0].delta.tool_calls[$i]")
-                                current_tool_calls[$idx]=$(echo "${current_tool_calls[$idx]}" "$delta_tc" | jq -s '
-                                    .[0] as $base | .[1] as $delta |
-                                    $base |
-                                    if $delta.id then .id = $delta.id else . end |
-                                    if $delta.type then .type = $delta.type else . end |
-                                    if $delta.function then
-                                        .function = (
-                                            (.function // {}) |
-                                            if $delta.function.name then .name = $delta.function.name else . end |
-                                            if $delta.function.arguments then
-                                                .arguments = ((.arguments // "") + $delta.function.arguments)
-                                            else . end
-                                        )
-                                    else . end
-                                ')
-                            done
-                        fi
-                    elif [[ "$line" =~ ^[0-9]{3}$ ]]; then
-                        http_code="$line"
+                    if [[ "$DONE_RECEIVED" == "true" || -n "$api_error" ]]; then
+                        break
                     fi
                 done
                 exec 3<&-
@@ -787,19 +830,21 @@ oai_make_request() {
                         local message_json
                         message_json=$(echo "$response" | jq -c '.choices[0].message // empty' 2>/dev/null)
                         if [[ -n "$message_json" ]]; then
-                            response_content=$(echo "$message_json" | jq -j '.content // empty'; printf x)
+                            response_content=$(echo "$message_json" | jq -j '.content // empty' 2>/dev/null; printf x)
                             response_content="${response_content%x}"
-                            reasoning_content=$(echo "$message_json" | jq -j '.reasoning_content // empty'; printf x)
+                            reasoning_content=$(echo "$message_json" | jq -j '.reasoning_content // empty' 2>/dev/null; printf x)
                             reasoning_content="${reasoning_content%x}"
 
                             local tc_count
-                            tc_count=$(echo "$message_json" | jq '(.tool_calls // []) | length')
-                            if [[ "$tc_count" -gt 0 ]]; then
+                            tc_count=$(echo "$message_json" | jq '(.tool_calls // []) | length' 2>/dev/null)
+                            if [[ "$tc_count" =~ ^[0-9]+$ ]] && [[ "$tc_count" -gt 0 ]]; then
                                 has_tool_calls=true
                                 for ((i=0; i<tc_count; i++)); do
                                     local tc_json
-                                    tc_json=$(echo "$message_json" | jq -c ".tool_calls[$i]")
-                                    current_tool_calls[$i]="$tc_json"
+                                    tc_json=$(echo "$message_json" | jq -c ".tool_calls[$i]" 2>/dev/null)
+                                    if [[ -n "$tc_json" ]]; then
+                                        current_tool_calls[$i]="$tc_json"
+                                    fi
                                 done
                             fi
                         fi
@@ -892,7 +937,9 @@ oai_make_request() {
             # Format accumulated tool calls
             local final_tool_calls="[]"
             for tc in "${current_tool_calls[@]}"; do
-                final_tool_calls=$(echo "$final_tool_calls" | jq --argjson tc "$tc" '. + [$tc]')
+                if [[ -n "$tc" && "$tc" != "null" ]]; then
+                    final_tool_calls=$(echo "$final_tool_calls" | jq --argjson tc "$tc" '. + [$tc]')
+                fi
             done
 
             # Append assistant message with tool_calls to history
