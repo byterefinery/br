@@ -546,13 +546,15 @@ Each skill lives in `.agents/skills/<skill_name>/` and contains:
 - `references/` — Documents you can read when needed
 - `scripts/` — Scripts you can run using `exec_skill_script`
 - `assets/` — Templates and other files
-## How to Work With Skills (Follow This Order)
-1. Call `list_skills` to see what skills are available
-2. Check if any skill's description matches the user's request
-3. If yes, call `load_skill(skill_name)` to load its instructions
-4. Follow the steps in the loaded `SKILL.md` exactly
-5. Only call `read_skill_resource` when `SKILL.md` explicitly tells you to read something
-6. Use `exec_skill_script` to run scripts from the skill's `.agents/skills/<skill_name>/scripts/` directory
+## How to Work With Skills
+1. Call `list_skills` to discover skills.
+2. Call `load_skill(skill_name)` when a skill matches the task.
+3. Call `list_skill_files(skill_name)` to explore the skill's contents.
+4. Read files from `references/` using `read_skill_resource` **only** when instructed by `SKILL.md`.
+5. Run scripts from `scripts/` using `exec_skill_script` **only** if scripts exist.
+6. Do **not** read anything from `assets/`.
+7. Do **not** read anything from `scripts/`.
+8. Always follow the instructions in `SKILL.md`.
 EOF
 }
 
