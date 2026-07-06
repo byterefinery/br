@@ -169,26 +169,12 @@ get_tools_json() {
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "description": "Path to the file"
-          },
-          "start_line": {
-            "type": "integer",
-            "description": "First line to read (1-based)"
-          },
-          "end_line": {
-            "type": "integer",
-            "description": "Last line to read (1-based, inclusive)"
-          },
-          "append_loc": {
-            "type": "boolean",
-            "description": "Prefix each line with its line number"
-          }
+          "path": { "type": "string", "description": "Path to the file" },
+          "start_line": { "type": "integer", "description": "First line to read (1-based)" },
+          "end_line": { "type": "integer", "description": "Last line to read (1-based, inclusive)" },
+          "append_loc": { "type": "boolean", "description": "Prefix each line with its line number" }
         },
-        "required": [
-          "path"
-        ]
+        "required": ["path"]
       }
     }
   },
@@ -200,19 +186,10 @@ get_tools_json() {
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "description": "Path of the file to write"
-          },
-          "content": {
-            "type": "string",
-            "description": "Content to write"
-          }
+          "path": { "type": "string", "description": "Path of the file to write" },
+          "content": { "type": "string", "description": "Content to write" }
         },
-        "required": [
-          "path",
-          "content"
-        ]
+        "required": ["path", "content"]
       }
     }
   },
@@ -224,45 +201,22 @@ get_tools_json() {
       "parameters": {
         "type": "object",
         "properties": {
-          "path": {
-            "type": "string",
-            "description": "Path to the file"
-          },
+          "path": { "type": "string", "description": "Path to the file" },
           "changes": {
             "type": "array",
             "items": {
               "type": "object",
               "properties": {
-                "mode": {
-                  "type": "string",
-                  "description": "\"replace\", \"delete\", or \"append\""
-                },
-                "line_start": {
-                  "type": "integer",
-                  "description": "Start line (1-based). Use -1 for end of file"
-                },
-                "line_end": {
-                  "type": "integer",
-                  "description": "End line (1-based)"
-                },
-                "content": {
-                  "type": "string",
-                  "description": "Content to insert (empty string for delete)"
-                }
+                "mode": { "type": "string", "description": "\"replace\", \"delete\", or \"append\"" },
+                "line_start": { "type": "integer", "description": "Start line (1-based). Use -1 for end of file" },
+                "line_end": { "type": "integer", "description": "End line (1-based)" },
+                "content": { "type": "string", "description": "Content to insert (empty string for delete)" }
               },
-              "required": [
-                "mode",
-                "line_start",
-                "line_end",
-                "content"
-              ]
+              "required": ["mode", "line_start", "line_end", "content"]
             }
           }
         },
-        "required": [
-          "path",
-          "changes"
-        ]
+        "required": ["path", "changes"]
       }
     }
   },
@@ -274,22 +228,11 @@ get_tools_json() {
       "parameters": {
         "type": "object",
         "properties": {
-          "command": {
-            "type": "string",
-            "description": "Shell command to run"
-          },
-          "timeout": {
-            "type": "integer",
-            "description": "Timeout in seconds (default: 10)"
-          },
-          "max_output_size": {
-            "type": "integer",
-            "description": "Max output size in bytes (default: 16384)"
-          }
+          "command": { "type": "string", "description": "Shell command to run" },
+          "timeout": { "type": "integer", "description": "Timeout in seconds (default: 10)" },
+          "max_output_size": { "type": "integer", "description": "Max output size in bytes (default: 16384)" }
         },
-        "required": [
-          "command"
-        ]
+        "required": ["command"]
       }
     }
   },
@@ -298,10 +241,7 @@ get_tools_json() {
     "function": {
       "name": "learn_about_skills",
       "description": "Learn how the Agent Skills system works and the correct way to use skill tools. Call this if you are unsure about the process.",
-      "parameters": {
-        "type": "object",
-        "properties": {}
-      }
+      "parameters": { "type": "object", "properties": {} }
     }
   },
   {
@@ -309,10 +249,7 @@ get_tools_json() {
     "function": {
       "name": "list_skills",
       "description": "List all available skills. Returns name, description, and path for each skill.",
-      "parameters": {
-        "type": "object",
-        "properties": {}
-      }
+      "parameters": { "type": "object", "properties": {} }
     }
   },
   {
@@ -328,9 +265,24 @@ get_tools_json() {
             "description": "Skill directory name under .agents/skills/ (e.g. 'pdf-processing')"
           }
         },
-        "required": [
-          "skill_name"
-        ]
+        "required": ["skill_name"]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_skill_files",
+      "description": "List all files inside a specific skill directory (including scripts/, references/, and assets/). Returns full paths under .agents/skills/. Use this to explore what resources a skill contains.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "skill_name": {
+            "type": "string",
+            "description": "Skill directory name under .agents/skills/ (e.g. 'websearch' or 'pdf-processing')"
+          }
+        },
+        "required": ["skill_name"]
       }
     }
   },
@@ -342,19 +294,10 @@ get_tools_json() {
       "parameters": {
         "type": "object",
         "properties": {
-          "skill_name": {
-            "type": "string",
-            "description": "Skill directory name"
-          },
-          "resource_path": {
-            "type": "string",
-            "description": "Relative path (e.g. 'references/01-api.md' or 'scripts/helper.sh')"
-          }
+          "skill_name": { "type": "string", "description": "Skill directory name" },
+          "resource_path": { "type": "string", "description": "Relative path (e.g. 'references/01-api.md' or 'scripts/helper.sh')" }
         },
-        "required": [
-          "skill_name",
-          "resource_path"
-        ]
+        "required": ["skill_name", "resource_path"]
       }
     }
   },
@@ -366,26 +309,15 @@ get_tools_json() {
       "parameters": {
         "type": "object",
         "properties": {
-          "skill_name": {
-            "type": "string",
-            "description": "Skill directory name under `.agents/skills/`"
-          },
-          "script_path": {
-            "type": "string",
-            "description": "Script name inside the skill's `.agents/skills/<skill_name>/scripts/` directory (e.g. 'process.sh')"
-          },
+          "skill_name": { "type": "string", "description": "Skill directory name under `.agents/skills/`" },
+          "script_name": { "type": "string", "description": "Script name relative to the skill's `.agents/skills/scripts/` folder (e.g. 'process.sh')" },
           "args": {
             "type": "array",
-            "items": {
-              "type": "string"
-            },
+            "items": { "type": "string" },
             "description": "Optional arguments to pass to the script"
           }
         },
-        "required": [
-          "skill_name",
-          "script_path"
-        ]
+        "required": ["skill_name", "script_name"]
       }
     }
   }
@@ -684,6 +616,33 @@ list_skills() {
     echo "$result"
 }
 
+list_skill_files() {
+    local args_json="$1"
+
+    local skill_name
+    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
+
+    if [[ -z "$skill_name" ]]; then
+        echo "Error: 'skill_name' is required for list_skill_files"
+        return 1
+    fi
+
+    # Basic path traversal check
+    if [[ "$skill_name" == *..* ]]; then
+        echo "Error: Path traversal is not allowed"
+        return 1
+    fi
+
+    local skill_dir=".agents/skills/$skill_name"
+
+    if [[ ! -d "$skill_dir" ]]; then
+        echo "Error: Skill directory not found: $skill_name (looked for $skill_dir)"
+        return 1
+    fi
+
+    find "$skill_dir" -type f | sort
+}
+
 load_skill() {
     local args_json="$1"
 
@@ -762,29 +721,29 @@ read_skill_resource() {
 exec_skill_script() {
     local args_json="$1"
 
-    local skill_name script_path
+    local skill_name script_name
     skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
-    script_path=$(echo "$args_json" | jq -r '.script_path // empty')
+    script_name=$(echo "$args_json" | jq -r '.script_name // empty')
 
     if [[ -z "$skill_name" ]]; then
         echo "Error: 'skill_name' is required for exec_skill_script"
         return 1
     fi
 
-    if [[ -z "$script_path" ]]; then
-        echo "Error: 'script_path' is required for exec_skill_script"
+    if [[ -z "$script_name" ]]; then
+        echo "Error: 'script_name' is required for exec_skill_script"
         return 1
     fi
 
     # Basic path traversal check
-    if [[ "$skill_name" == *..* || "$script_path" == *..* ]]; then
+    if [[ "$skill_name" == *..* || "$script_name" == *..* ]]; then
         echo "Error: Path traversal is not allowed"
         return 1
     fi
 
     local skill_dir=".agents/skills/$skill_name"
     local scripts_dir="$skill_dir/scripts"
-    local full_path="$scripts_dir/$script_path"
+    local full_path="$scripts_dir/$script_name"
 
     # Verify the path stays within the skill's scripts directory
     if [[ -d "$scripts_dir" ]]; then
@@ -801,7 +760,7 @@ exec_skill_script() {
     fi
 
     if [[ ! -f "$full_path" ]]; then
-        echo "Error: Script not found: $script_path in skill $skill_name (looked for $full_path)"
+        echo "Error: Script not found: $script_name in skill $skill_name (looked for $full_path)"
         return 1
     fi
 
@@ -859,6 +818,7 @@ execute_tool() {
         "exec_shell_command")  exec_shell_command "$args_json" ;;
         "learn_about_skills")  learn_about_skills ;;
         "list_skills")         list_skills ;;
+        "list_skill_files")    list_skill_files "$args_json" ;;
         "load_skill")          load_skill "$args_json" ;;
         "read_skill_resource") read_skill_resource "$args_json" ;;
         "exec_skill_script")   exec_skill_script "$args_json" ;;
