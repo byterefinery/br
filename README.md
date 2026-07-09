@@ -1,5 +1,7 @@
 # br
 
+![br](./logo.png)
+
 ByteRefinery Agent (Harness)
 
 ## Bash Implementation
