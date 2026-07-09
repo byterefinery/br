@@ -35,3 +35,4 @@ cp .env.example .env
 4. Load skill `websearch`
 5. Execute `websearch` script
 6. Format results as Markdown table
+7. Exit, CTRL+D or `/exit`
