@@ -1325,11 +1325,26 @@ main() {
             continue
         fi
 
+        # Handle pop command
+        if [[ "$message" == "/pop" ]]; then
+            if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
+                local last_msg="${CONVERSATION[-1]}"
+                echo "${COLOR_DIM}[MESSAGE]${COLOR_RESET}"
+                echo "$last_msg" | jq $JQ_COLOR_FLAG .
+                echo "${COLOR_DIM}[/MESSAGE]${COLOR_RESET}"
+                unset 'CONVERSATION[-1]'
+            else
+                echo "Conversation is empty."
+            fi
+            continue
+        fi
+
         # Handle help command
         if [[ "$message" == "/help" ]]; then
             echo "${COLOR_DIM}Available commands:${COLOR_RESET}"
             echo "  /help       Show this help message"
             echo "  /dump       Print the current conversation history as JSON"
+            echo "  /pop        Pop the last message from conversation history"
             echo "  /new        Clear conversation history and start a new session"
             echo "  /clear      Alias for /new"
             echo "  /exit       Exit the agent harness"
