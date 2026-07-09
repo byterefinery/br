@@ -27,7 +27,76 @@ cp .env.example .env
 ./br.sh
 ```
 
-### Example
+## Local LLM Server
+
+**Recommended:** Build `llama.cpp` using **Vulkan** backend:
+```bash
+cd ~
+git clone git@github.com:ggml-org/llama.cpp.git
+cd llama.cpp
+rm -rf build ; git pull ; cmake -B build -DGGML_VULKAN=ON && cmake --build build --config Release -j $(nproc)
+```
+
+Run `llama.cpp` server and `LiquidAI/LFM2.5-8B-A1B` model:
+```bash
+~/llama.cpp/build/bin/llama-server \
+    -hf 'LiquidAI/LFM2.5-8B-A1B-GGUF:Q8_0' \
+    --alias 'LiquidAI/LFM2.5-8B-A1B' \
+    -ngl -1 \
+    -np 1 \
+    --temp 0.2 --top-k 80 --repeat-penalty 1.05 -fa on \
+    --spec-default \
+    --reasoning on \
+    --chat-template-kwargs '{"preserve_thinking": true}' \
+    --tools all \
+    --ui
+```
+
+Test streaming response:
+```bash
+curl -N http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "LiquidAI/LFM2.5-8B-A1B",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Hello!"
+      }
+    ],
+    "stream": true
+  }'
+```
+
+Test non-streaming response:
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{
+    "model": "LiquidAI/LFM2.5-8B-A1B",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant."
+      },
+      {
+        "role": "user",
+        "content": "Hello!"
+      }
+    ],
+    "stream": false
+  }'
+```
+
+## Example
+
+### Skills - websearch
 
 1. Help commands inside `br`
 2. Load agent skills system
