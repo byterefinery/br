@@ -239,8 +239,8 @@ get_tools_json() {
   {
     "type": "function",
     "function": {
-      "name": "learn_about_skills",
-      "description": "Learn how the Agent Skills system works and the correct way to use skill tools. Call this if you are unsure about the process.",
+      "name": "agent_skills_system",
+      "description": "Learn how the Agent Skills System works and the correct way to use skill tools.",
       "parameters": { "type": "object", "properties": {} }
     }
   },
@@ -256,13 +256,13 @@ get_tools_json() {
     "type": "function",
     "function": {
       "name": "load_skill",
-      "description": "Load a skill's SKILL.md into context. Use after checking with list_skills.",
+      "description": "Load a skill's `.agents/skills/<skill_name>/SKILL.md` into context. Use after checking with `list_skills`.",
       "parameters": {
         "type": "object",
         "properties": {
           "skill_name": {
             "type": "string",
-            "description": "Skill directory name under .agents/skills/ (e.g. 'pdf-processing')"
+            "description": "Skill directory name `<skill_name>` under `.agents/skills/` (e.g. 'pdf-processing')"
           }
         },
         "required": ["skill_name"]
@@ -273,13 +273,13 @@ get_tools_json() {
     "type": "function",
     "function": {
       "name": "list_skill_files",
-      "description": "List all files inside a specific skill directory (including scripts/, references/, and assets/). Returns full paths under .agents/skills/. Use this to explore what resources a skill contains.",
+      "description": "List all files inside a specific skill directory (including `scripts/`, `references/`, and `assets/`). Returns full paths under `.agents/skills/<skill_name>/`. Use this to explore what resources a skill contains.",
       "parameters": {
         "type": "object",
         "properties": {
           "skill_name": {
             "type": "string",
-            "description": "Skill directory name under .agents/skills/ (e.g. 'websearch' or 'pdf-processing')"
+            "description": "Skill directory name `<skill_name>` under `.agents/skills/<skill_name>/` (e.g. 'pdf-processing')"
           }
         },
         "required": ["skill_name"]
@@ -290,12 +290,12 @@ get_tools_json() {
     "type": "function",
     "function": {
       "name": "read_skill_resource",
-      "description": "Read a file from a skill's references/, scripts/, or assets/ directory. resource_path is relative to the skill root.",
+      "description": "Read a file from a skill's `references/`, `scripts/`, or `assets/` directory. `resource_path` is relative to the skill root `.agents/skills/<skill_name>/<resource_path>`.",
       "parameters": {
         "type": "object",
         "properties": {
-          "skill_name": { "type": "string", "description": "Skill directory name" },
-          "resource_path": { "type": "string", "description": "Relative path (e.g. 'references/01-api.md' or 'scripts/helper.sh')" }
+          "skill_name": { "type": "string", "description": "Skill directory name `<skill_name>`" },
+          "resource_path": { "type": "string", "description": "Relative path (e.g. 'references/01-api.md' or 'scripts/pdf-processing.sh')" }
         },
         "required": ["skill_name", "resource_path"]
       }
@@ -305,16 +305,16 @@ get_tools_json() {
     "type": "function",
     "function": {
       "name": "exec_skill_script",
-      "description": "Execute a script from a skill's `.agents/skills/<skill_name>/scripts/` directory. Use this instead of exec_shell_command for skill scripts.",
+      "description": "Execute a script `<skill_name>` (e.g. 'pdf-processing.sh') from a skill's `.agents/skills/<skill_name>/scripts/<script_name>` directory. Use this instead of `exec_shell_command` for skill scripts.",
       "parameters": {
         "type": "object",
         "properties": {
-          "skill_name": { "type": "string", "description": "Skill directory name under `.agents/skills/`" },
-          "script_name": { "type": "string", "description": "Script name relative to the skill's `.agents/skills/scripts/` folder (e.g. 'process.sh')" },
+          "skill_name": { "type": "string", "description": "Skill directory name `<skill_name>`" },
+          "script_name": { "type": "string", "description": "Script name `<skill_name>` (e.g. 'pdf-processing.sh') relative to the skill's `.agents/skills/<skill_name>/scripts/` directory" },
           "args": {
             "type": "array",
             "items": { "type": "string" },
-            "description": "Optional arguments to pass to the script"
+            "description": "Optional arguments to pass to the script `.agents/skills/<skill_name>/scripts/<script_name>`"
           }
         },
         "required": ["skill_name", "script_name"]
@@ -529,32 +529,35 @@ exec_shell_command() {
     echo "$output"
 }
 
-learn_about_skills() {
+agent_skills_system() {
     cat <<'EOF'
 # Agent Skills System
 Skills are self-contained packages that give you specialized capabilities. They follow progressive disclosure — only load what you need for the current task.
+
 ## Strict Rules (Must Follow)
-- **NEVER** use `read_file` or `exec_shell_command` on anything inside `.agents/skills/`
-- **ALWAYS** use the dedicated skill tools to interact with skills:
-  - `list_skills`
-  - `load_skill`
-  - `read_skill_resource`
-  - `exec_skill_script`
+Always use the dedicated skill tools to interact with skills:
+- `list_skills` — list all available skills
+- `load_skill` — load a skill
+- `list_skill_files` — list all skill's files
+- `read_skill_resource` — read a file from a skill's `references/`, `scripts/`, or `assets/` directory
+- `exec_skill_script` — execute skill's script
+
 ## Directory Structure
 Each skill lives in `.agents/skills/<skill_name>/` and contains:
 - `SKILL.md` — Main file with instructions (required)
-- `references/` — Documents you can read when needed
+- `references/` — Documents you can read when needed using `read_skill_resource`
 - `scripts/` — Scripts you can run using `exec_skill_script`
-- `assets/` — Templates and other files
+- `assets/` — Templates and other files — never read or run them
+
 ## How to Work With Skills
 1. Call `list_skills` to discover skills.
 2. Call `load_skill(skill_name)` when a skill matches the task.
 3. Call `list_skill_files(skill_name)` to explore the skill's contents.
 4. Read files from `references/` using `read_skill_resource` **only** when instructed by `SKILL.md`.
-5. Run scripts from `scripts/` using `exec_skill_script` **only** if scripts exist.
-6. Do **not** read anything from `assets/`.
-7. Do **not** read anything from `scripts/`.
-8. Always follow the instructions in `SKILL.md`.
+5. Run scripts from `scripts/` using `exec_skill_script` only if `.agents/skills/<skill_name>/scripts/` exist.
+6. Do not read anything from `assets/`.
+7. Do not read anything from `scripts/`.
+8. Always follow the instructions in `.agents/skills/<skill_name>/SKILL.md`.
 EOF
 }
 
@@ -812,7 +815,7 @@ execute_tool() {
         "write_file")          write_file "$args_json" ;;
         "edit_file")           edit_file "$args_json" ;;
         "exec_shell_command")  exec_shell_command "$args_json" ;;
-        "learn_about_skills")  learn_about_skills ;;
+        "agent_skills_system") agent_skills_system ;;
         "list_skills")         list_skills ;;
         "list_skill_files")    list_skill_files "$args_json" ;;
         "load_skill")          load_skill "$args_json" ;;
