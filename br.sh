@@ -828,6 +828,116 @@ execute_tool() {
     esac
 }
 
+# Compact the conversation history:
+# - Keep only user/assistant messages (drop tool calls/responses).
+# - Summarize them with a single non-streaming LLM request.
+# - Replace CONVERSATION with exactly two messages:
+#     1. user  -> "[Previous conversation summary]\n<summary>"
+#     2. assistant -> fake reasoning_content + content (acknowledgment).
+compact_conversation() {
+    if [[ ${#CONVERSATION[@]} -eq 0 ]]; then
+        echo "Conversation is empty, nothing to compact."
+        return 0
+    fi
+
+    # Build conversation_text from only user/assistant messages.
+    local conversation_text=""
+    local found=0
+    for msg in "${CONVERSATION[@]}"; do
+        local role content
+        role=$(echo "$msg" | jq -r '.role // empty')
+        content=$(echo "$msg" | jq -r '.content // empty')
+        if [[ "$role" == "user" || "$role" == "assistant" ]]; then
+            conversation_text+="${role}: ${content}"$'\n'
+            found=1
+        fi
+    done
+
+    if [[ "$found" -eq 0 ]]; then
+        echo "No user/assistant messages to compact."
+        return 0
+    fi
+
+    # Build the summarization prompt (ultra minimal, for small LLMs).
+    local summary_prompt
+    summary_prompt="Summarize the conversation below concisely.
+Focus on: main goal, skill names loaded and used, what was accomplished, and current status.
+
+Conversation:
+${conversation_text}
+
+Summary:"
+
+    # Build messages JSON for the summarization request.
+    local summary_messages_json
+    summary_messages_json=$(jq -n --arg content "$summary_prompt" '[{role: "user", content: $content}]')
+
+    # Build request body (force non-streaming for simplicity).
+    local request_body
+    request_body=$(jq -n \
+        --arg model "$BR_MODEL_NAME" \
+        --argjson messages "$summary_messages_json" \
+        '{model: $model, messages: $messages, stream: false}')
+
+    # Prepare HTTP headers (same as oai_make_request).
+    local -a curl_args=()
+    curl_args+=("-H" "Content-Type: application/json")
+    curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
+    curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
+    if [[ -n "$BR_API_KEY" ]]; then
+        curl_args+=("-H" "Authorization: Bearer $BR_API_KEY")
+    fi
+
+    printf "%s[COMPACTING...]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+
+    local response
+    response=$(curl -s --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
+
+    if [[ -z "$response" ]]; then
+        echo "Error: Empty response from LLM server during compaction."
+        return 1
+    fi
+
+    local api_error
+    api_error=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
+    if [[ -n "$api_error" ]]; then
+        echo "Error: $api_error"
+        return 1
+    fi
+
+    local summary
+    summary=$(echo "$response" | jq -j '.choices[0].message.content // empty' 2>/dev/null; printf x)
+    summary="${summary%x}"
+
+    if [[ -z "$summary" ]]; then
+        echo "Error: Empty summary received from LLM."
+        return 1
+    fi
+
+    # Build the two replacement messages.
+    local summary_user_content="[SUMMARY]
+${summary}
+[/SUMMARY]"
+
+    local summary_user_msg
+    summary_user_msg=$(jq -n --arg content "$summary_user_content" '{role: "user", content: $content}')
+
+    local reasoning_text="The conversation history was compressed into a summary. I now understand the previous context."
+    local assistant_content="Got it. Continuing from the summary."
+
+    local summary_assistant_msg
+    summary_assistant_msg=$(jq -n \
+        --arg rc "$reasoning_text" \
+        --arg content "$assistant_content" \
+        '{role: "assistant", reasoning_content: $rc, content: $content}')
+
+    # Replace CONVERSATION with exactly the two new messages.
+    CONVERSATION=("$summary_user_msg" "$summary_assistant_msg")
+
+    printf "%s[COMPACTED]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+    printf "%sSummary:%s %s\n\n" "${COLOR_DIM}" "${COLOR_RESET}" "$summary"
+}
+
 oai_make_request() {
     local user_message="$1"
 
@@ -1339,12 +1449,19 @@ main() {
             continue
         fi
 
+        # Handle compact command
+        if [[ "$message" == "/compact" ]]; then
+            compact_conversation
+            continue
+        fi
+
         # Handle help command
         if [[ "$message" == "/help" ]]; then
             echo "${COLOR_DIM}Available commands:${COLOR_RESET}"
             echo "  /help       Show this help message"
             echo "  /dump       Print the current conversation history as JSON"
             echo "  /pop        Pop the last message from conversation history"
+            echo "  /compact    Summarize and compact the conversation history"
             echo "  /new        Clear conversation history and start a new session"
             echo "  /clear      Alias for /new"
             echo "  /exit       Exit the agent harness"
