@@ -1,0 +1,87 @@
+{%- set ns = namespace(system_prompt='') %}
+
+{%- for message in messages %}
+    {%- if message['role'] == 'system' %}
+        {%- set ns.system_prompt = message['content'] %}
+    {%- endif %}
+{%- endfor %}
+
+{{bos_token}}
+
+{%- if tools %}
+    {{- "System: " }}
+
+    {%- if ns.system_prompt != '' %}
+        {{- ns.system_prompt|trim }}
+        {{- "\n" }}
+    {%- endif %}
+
+    {{- "Tools:\n" }}
+    {{- "[\n" }}
+
+    {%- for tool in tools %}
+        {{- tool | tojson }}
+
+        {%- if not loop.last %}
+            {{- "," }}
+        {%- endif %}
+
+        {{- "\n" }}
+    {%- endfor %}
+
+    {{- "]\n" }}
+    {{- "For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags (think a bit)." }}
+    {{- "\n\n" }}
+{%- else %}
+    {%- if ns.system_prompt != '' %}
+        {{- "System: " }}
+        {{- ns.system_prompt|trim }}
+        {{- "\n\n" }}
+    {%- endif %}
+{%- endif %}
+
+{%- for message in messages %}
+    {%- if message['role'] == 'user' %}
+        {{- 'User: ' }}
+        {{- message['content']|trim }}
+    {%- endif %}
+
+    {%- if message['role'] == 'assistant' %}
+        {%- set content = message['content'] %}
+
+        {%- if '</think>' in content %}
+            {%- set content = content.split('</think>')[-1] %}
+        {%- endif %}
+
+        {{- 'Assistant: ' }}
+        {{- content|trim }}
+
+        {%- for tool_call in message.tool_calls %}
+            {%- if tool_call.function is defined %}
+                {%- set tool_call = tool_call.function %}
+            {%- endif %}
+            {{- '\n<tool_call>\n{"name": "' }}
+            {{- tool_call.name }}
+            {{- '", "arguments": ' }}
+            {{- tool_call.arguments | tojson }}
+            {{- '}\n</tool_call>' }}
+        {%- endfor %}
+    {%- endif %}
+
+    {%- if message['role'] == 'tool' %}
+        {{- "User: " }}
+        {{- message['content']|trim }}
+    {%- endif %}
+
+    {{- "\n\n" }}
+{%- endfor %}
+
+{%- if add_generation_prompt %}
+    {{- "Assistant: " }}
+
+    {%- if enable_thinking is defined and enable_thinking is true %}
+        {{- "<think>\n" }}
+    {%- else %}
+        {{- "<think>\n</think>\n" }}
+    {%- endif %}
+{%- endif %}
