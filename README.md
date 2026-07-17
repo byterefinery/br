@@ -110,16 +110,16 @@ rm -rf build ; git pull ; cmake -B build -DGGML_VULKAN=ON && cmake --build build
     --ui
 ```
 
-### google/gemma-4-12b-it
+### google/gemma-4-12B-it-qat
 
 ```bash
 ~/llama.cpp/build/bin/llama-server \
-    -hf 'unsloth/gemma-4-12b-it-GGUF:Q3_K_XL' \
-    --alias 'google/gemma-4-12b-it-GGUF' \
+    -hf 'unsloth/gemma-4-12B-it-qat-GGUF:Q4_K_XL' \
+    --alias 'google/gemma-4-12B-it-qat' \
     -ngl -1 \
     -np 1 \
-    --temp 1.0 --top-p 0.95 --top-k 64 -n 16384 -c 131072 -fa on \
-    -ctk q8_0 -ctv q8_0 \
+    --temp 1.0 --top-p 0.95 --top-k 64 -c 131072 -fa on \
+    -ctk q4_1 -ctv q4_1 \
     --no-mmproj-offload \
     --spec-default \
     --spec-type draft-mtp --spec-draft-n-max 3 \

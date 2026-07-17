@@ -333,14 +333,14 @@ read_file() {
     local args_json="$1"
 
     local path start_line end_line append_loc
-    path=$(echo "$args_json" | jq -r '.path // empty')
+    path=$(printf '%s' "$args_json" | jq -r '.path // empty')
     if [[ -z "$path" ]]; then
         echo "Error: 'path' is required for read_file"
         return 1
     fi
-    start_line=$(echo "$args_json" | jq -r '.start_line // 1')
-    end_line=$(echo "$args_json" | jq -r '.end_line // empty')
-    append_loc=$(echo "$args_json" | jq -r '.append_loc // false')
+    start_line=$(printf '%s' "$args_json" | jq -r '.start_line // 1')
+    end_line=$(printf '%s' "$args_json" | jq -r '.end_line // empty')
+    append_loc=$(printf '%s' "$args_json" | jq -r '.append_loc // false')
 
     if [[ ! -f "$path" ]]; then
         echo "Error: File not found: $path"
@@ -386,12 +386,12 @@ write_file() {
     local args_json="$1"
 
     local path content
-    path=$(echo "$args_json" | jq -r '.path // empty')
+    path=$(printf '%s' "$args_json" | jq -r '.path // empty')
     if [[ -z "$path" ]]; then
         echo "Error: 'path' is required for write_file"
         return 1
     fi
-    content=$(echo "$args_json" | jq -r '.content // empty')
+    content=$(printf '%s' "$args_json" | jq -r '.content // empty')
 
     local dir
     dir=$(dirname "$path")
@@ -407,12 +407,12 @@ edit_file() {
     local args_json="$1"
 
     local path changes
-    path=$(echo "$args_json" | jq -r '.path // empty')
+    path=$(printf '%s' "$args_json" | jq -r '.path // empty')
     if [[ -z "$path" ]]; then
         echo "Error: 'path' is required for edit_file"
         return 1
     fi
-    changes=$(echo "$args_json" | jq -c '.changes // empty')
+    changes=$(printf '%s' "$args_json" | jq -c '.changes // empty')
 
     if [[ -z "$changes" || "$changes" == "null" ]]; then
         echo "Error: 'changes' is required for edit_file"
@@ -427,18 +427,18 @@ edit_file() {
     mapfile -t lines < "$path"
 
     local num_changes
-    num_changes=$(echo "$changes" | jq 'length')
+    num_changes=$(printf '%s' "$changes" | jq 'length')
 
     # Sort changes by line_start descending to apply from bottom to top
     local sorted_changes
-    sorted_changes=$(echo "$changes" | jq -c 'sort_by(-.line_start)')
+    sorted_changes=$(printf '%s' "$changes" | jq -c 'sort_by(-.line_start)')
 
     for ((c=0; c<num_changes; c++)); do
         local mode line_start line_end content
-        mode=$(echo "$sorted_changes" | jq -r ".[$c].mode")
-        line_start=$(echo "$sorted_changes" | jq -r ".[$c].line_start")
-        line_end=$(echo "$sorted_changes" | jq -r ".[$c].line_end")
-        content=$(echo "$sorted_changes" | jq -r ".[$c].content")
+        mode=$(printf '%s' "$sorted_changes" | jq -r ".[$c].mode")
+        line_start=$(printf '%s' "$sorted_changes" | jq -r ".[$c].line_start")
+        line_end=$(printf '%s' "$sorted_changes" | jq -r ".[$c].line_end")
+        content=$(printf '%s' "$sorted_changes" | jq -r ".[$c].content")
 
         if [[ "$line_start" -eq -1 ]]; then
             if [[ "$mode" == "append" ]]; then
@@ -494,13 +494,13 @@ exec_shell_command() {
     local args_json="$1"
 
     local command timeout max_output_size
-    command=$(echo "$args_json" | jq -r '.command // empty')
+    command=$(printf '%s' "$args_json" | jq -r '.command // empty')
     if [[ -z "$command" ]]; then
         echo "Error: 'command' is required for exec_shell_command"
         return 1
     fi
-    timeout=$(echo "$args_json" | jq -r '.timeout // 10')
-    max_output_size=$(echo "$args_json" | jq -r '.max_output_size // 16384')
+    timeout=$(printf '%s' "$args_json" | jq -r '.timeout // 10')
+    max_output_size=$(printf '%s' "$args_json" | jq -r '.max_output_size // 16384')
 
     if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
         timeout=10
@@ -532,9 +532,11 @@ exec_shell_command() {
 agent_skills_system() {
     cat <<'EOF'
 # Agent Skills System
+
 Skills are self-contained packages that give you specialized capabilities. They follow progressive disclosure — only load what you need for the current task.
 
 ## Strict Rules (Must Follow)
+
 Always use the dedicated skill tools to interact with skills:
 - `list_skills` — list all available skills
 - `load_skill` — load a skill
@@ -543,6 +545,7 @@ Always use the dedicated skill tools to interact with skills:
 - `exec_skill_script` — execute skill's script
 
 ## Directory Structure
+
 Each skill lives in `.agents/skills/<skill_name>/` and contains:
 - `SKILL.md` — Main file with instructions (required)
 - `references/` — Documents you can read when needed using `read_skill_resource`
@@ -550,6 +553,7 @@ Each skill lives in `.agents/skills/<skill_name>/` and contains:
 - `assets/` — Templates and other files — never read or run them
 
 ## How to Work With Skills
+
 1. Call `list_skills` to discover skills.
 2. Call `load_skill(skill_name)` when a skill matches the task.
 3. Call `list_skill_files(skill_name)` to explore the skill's contents.
@@ -569,7 +573,8 @@ list_skills() {
         return 0
     fi
 
-    local result="[]"
+    # We will collect skill JSON strings and then slurp them
+    local -a skill_jsons=()
 
     while IFS= read -r -d '' skill_file; do
         local skill_dir
@@ -590,12 +595,12 @@ list_skills() {
 
         # Parse name and description from frontmatter
         local name desc
-        name=$(echo "$frontmatter" \
+        name=$(printf '%s' "$frontmatter" \
                | grep '^name:' | head -1 \
                | sed 's/^name:[[:space:]]*//' \
                | sed "s/^['\"]//;s/['\"]$//" \
                | tr -d '\r')
-        desc=$(echo "$frontmatter" \
+        desc=$(printf '%s' "$frontmatter" \
                | grep '^description:' | head -1 \
                | sed 's/^description:[[:space:]]*//' \
                | sed "s/^['\"]//;s/['\"]$//" \
@@ -605,21 +610,26 @@ list_skills() {
         [[ -z "$name" ]] && name="$skill_name"
         [[ -z "$desc" ]] && desc="(no description)"
 
-        result=$(echo "$result" | jq \
+        # Add JSON object to array
+        skill_jsons+=($(jq -c -n \
             --arg name "$name" \
             --arg desc "$desc" \
             --arg path "$skill_dir" \
-            '. + [{"name": $name, "description": $desc, "skill_path": $path}]')
+            '{"name": $name, "description": $desc, "skill_path": $path}'))
     done < <(find "$skills_dir" -mindepth 2 -name "SKILL.md" -print0 2>/dev/null)
 
-    echo "$result"
+    if [[ ${#skill_jsons[@]} -eq 0 ]]; then
+        echo "[]"
+    else
+        printf '%s\n' "${skill_jsons[@]}" | jq -s '.'
+    fi
 }
 
 list_skill_files() {
     local args_json="$1"
 
     local skill_name
-    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
+    skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
 
     if [[ -z "$skill_name" ]]; then
         echo "Error: 'skill_name' is required for list_skill_files"
@@ -646,7 +656,7 @@ load_skill() {
     local args_json="$1"
 
     local skill_name
-    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
+    skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
 
     if [[ -z "$skill_name" ]]; then
         echo "Error: 'skill_name' is required for load_skill"
@@ -673,8 +683,8 @@ read_skill_resource() {
     local args_json="$1"
 
     local skill_name resource_path
-    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
-    resource_path=$(echo "$args_json" | jq -r '.resource_path // empty')
+    skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
+    resource_path=$(printf '%s' "$args_json" | jq -r '.resource_path // empty')
 
     if [[ -z "$skill_name" ]]; then
         echo "Error: 'skill_name' is required for read_skill_resource"
@@ -721,8 +731,8 @@ exec_skill_script() {
     local args_json="$1"
 
     local skill_name script_name
-    skill_name=$(echo "$args_json" | jq -r '.skill_name // empty')
-    script_name=$(echo "$args_json" | jq -r '.script_name // empty')
+    skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
+    script_name=$(printf '%s' "$args_json" | jq -r '.script_name // empty')
 
     if [[ -z "$skill_name" ]]; then
         echo "Error: 'skill_name' is required for exec_skill_script"
@@ -771,11 +781,11 @@ exec_skill_script() {
     # Build command with optional arguments
     local -a cmd_args=("$full_path")
     local num_args
-    num_args=$(echo "$args_json" | jq '(.args // []) | length')
+    num_args=$(printf '%s' "$args_json" | jq '(.args // []) | length')
 
     for ((i=0; i<num_args; i++)); do
         local arg
-        arg=$(echo "$args_json" | jq -r ".args[$i]")
+        arg=$(printf '%s' "$args_json" | jq -r ".args[$i]")
         cmd_args+=("$arg")
     done
 
@@ -805,7 +815,7 @@ execute_tool() {
 
     # Validate JSON arguments before dispatching
     local jq_err
-    if ! jq_err=$(echo "$args_json" | jq empty 2>&1); then
+    if ! jq_err=$(printf '%s' "$args_json" | jq empty 2>&1); then
         echo "Error: Invalid JSON arguments: $jq_err"
         return 1
     fi
@@ -845,8 +855,8 @@ compact_conversation() {
     local found=0
     for msg in "${CONVERSATION[@]}"; do
         local role content
-        role=$(echo "$msg" | jq -r '.role // empty')
-        content=$(echo "$msg" | jq -r '.content // empty')
+        role=$(printf '%s' "$msg" | jq -r '.role // empty')
+        content=$(printf '%s' "$msg" | jq -r '.content // empty')
         if [[ "$role" == "user" || "$role" == "assistant" ]]; then
             conversation_text+="${role}: ${content}"$'\n'
             found=1
@@ -864,20 +874,21 @@ compact_conversation() {
 Focus on: main goal, skill names loaded and used, what was accomplished, and current status.
 
 Conversation:
-${conversation_text}
+ ${conversation_text}
 
 Summary:"
 
     # Build messages JSON for the summarization request.
     local summary_messages_json
-    summary_messages_json=$(jq -n --arg content "$summary_prompt" '[{role: "user", content: $content}]')
+    summary_messages_json=$(printf '%s' "$summary_prompt" | jq -Rs '[{role: "user", content: .}]')
 
     # Build request body (force non-streaming for simplicity).
     local request_body
     request_body=$(jq -n \
         --arg model "$BR_MODEL_NAME" \
-        --argjson messages "$summary_messages_json" \
-        '{model: $model, messages: $messages, stream: false}')
+        --argjson stream "false" \
+        '{model: $model, messages: input, stream: $stream}' \
+        <<< "$summary_messages_json")
 
     # Prepare HTTP headers (same as oai_make_request).
     local -a curl_args=()
@@ -899,14 +910,14 @@ Summary:"
     fi
 
     local api_error
-    api_error=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
+    api_error=$(printf '%s' "$response" | jq -r '.error.message // empty' 2>/dev/null)
     if [[ -n "$api_error" ]]; then
         echo "Error: $api_error"
         return 1
     fi
 
     local summary
-    summary=$(echo "$response" | jq -j '.choices[0].message.content // empty' 2>/dev/null; printf x)
+    summary=$(printf '%s' "$response" | jq -j '.choices[0].message.content // empty' 2>/dev/null; printf x)
     summary="${summary%x}"
 
     if [[ -z "$summary" ]]; then
@@ -916,20 +927,17 @@ Summary:"
 
     # Build the two replacement messages.
     local summary_user_content="[SUMMARY]
-${summary}
+ ${summary}
 [/SUMMARY]"
 
     local summary_user_msg
-    summary_user_msg=$(jq -n --arg content "$summary_user_content" '{role: "user", content: $content}')
+    summary_user_msg=$(printf '%s' "$summary_user_content" | jq -Rs '{role: "user", content: .}')
 
     local reasoning_text="The conversation history was compressed into a summary. I now understand the previous context."
     local assistant_content="Got it. Continuing from the summary."
 
     local summary_assistant_msg
-    summary_assistant_msg=$(jq -n \
-        --arg rc "$reasoning_text" \
-        --arg content "$assistant_content" \
-        '{role: "assistant", reasoning_content: $rc, content: $content}')
+    summary_assistant_msg=$(printf '%s' "$assistant_content" | jq -Rs --arg rc "$reasoning_text" '{role: "assistant", reasoning_content: $rc, content: .}')
 
     # Replace CONVERSATION with exactly the two new messages.
     CONVERSATION=("$summary_user_msg" "$summary_assistant_msg")
@@ -941,29 +949,29 @@ ${summary}
 oai_make_request() {
     local user_message="$1"
 
-    # Append user message to conversation history
+    # Append user message to conversation history safely via stdin
     local user_msg_json
-    user_msg_json=$(jq -n --arg content "$user_message" '{role: "user", content: $content}')
+    user_msg_json=$(printf '%s' "$user_message" | jq -Rs '{role: "user", content: .}')
     CONVERSATION+=("$user_msg_json")
 
     local tools_json
     tools_json=$(get_tools_json)
 
     while true; do
-        # Build messages array from history
+        # Build messages array from history using jq -s to handle large histories safely
         local messages_json="[]"
-        for msg in "${CONVERSATION[@]}"; do
-            messages_json=$(echo "$messages_json" | jq --argjson msg "$msg" '. + [$msg]')
-        done
+        if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
+            messages_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
+        fi
 
-        # Construct API request body
+        # Construct API request body safely passing messages via stdin
         local request_body
         request_body=$(jq -n \
             --arg model "$BR_MODEL_NAME" \
-            --argjson messages "$messages_json" \
             --argjson stream "$BR_MODEL_STREAM" \
             --argjson tools "$tools_json" \
-            '{model: $model, messages: $messages, stream: $stream, tools: $tools}')
+            '{model: $model, messages: input, stream: $stream, tools: $tools}' \
+            <<< "$messages_json")
 
         # Prepare HTTP headers
         local curl_args=()
@@ -1051,7 +1059,7 @@ oai_make_request() {
 
                             # Check for API error
                             local err_msg
-                            err_msg=$(echo "$json_data" | jq -r '.error.message // empty' 2>/dev/null)
+                            err_msg=$(printf '%s' "$json_data" | jq -r '.error.message // empty' 2>/dev/null)
                             if [[ -n "$err_msg" ]]; then
                                 api_error="$err_msg"
                                 break
@@ -1059,7 +1067,7 @@ oai_make_request() {
 
                             # Process reasoning content
                             local reasoning_delta
-                            reasoning_delta=$(echo "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; printf x)
+                            reasoning_delta=$(printf '%s' "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; printf x)
                             reasoning_delta="${reasoning_delta%x}"
                             if [[ -n "$reasoning_delta" ]]; then
                                 if [[ "$reasoning_started" == "false" ]]; then
@@ -1072,7 +1080,7 @@ oai_make_request() {
 
                             # Process response content
                             local content
-                            content=$(echo "$json_data" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; printf x)
+                            content=$(printf '%s' "$json_data" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; printf x)
                             content="${content%x}"
                             if [[ -n "$content" ]]; then
                                 if [[ "$reasoning_started" == "true" ]]; then
@@ -1091,7 +1099,7 @@ oai_make_request() {
 
                             # Process tool calls (accumulate fragments by index)
                             local tc_count
-                            tc_count=$(echo "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length' 2>/dev/null)
+                            tc_count=$(printf '%s' "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length' 2>/dev/null)
                             if [[ "$tc_count" =~ ^[0-9]+$ ]] && [[ "$tc_count" -gt 0 ]]; then
                                 if [[ "$reasoning_started" == "true" ]]; then
                                     printf "[/THINK]%s\n\n" "${COLOR_RESET}"
@@ -1100,7 +1108,7 @@ oai_make_request() {
                                 has_tool_calls=true
                                 for ((i=0; i<tc_count; i++)); do
                                     local idx
-                                    idx=$(echo "$json_data" | jq -r ".choices[0].delta.tool_calls[$i].index" 2>/dev/null)
+                                    idx=$(printf '%s' "$json_data" | jq -r ".choices[0].delta.tool_calls[$i].index" 2>/dev/null)
                                     if [[ -z "$idx" || "$idx" == "null" ]]; then
                                         continue
                                     fi
@@ -1110,9 +1118,9 @@ oai_make_request() {
                                     fi
 
                                     local delta_tc
-                                    delta_tc=$(echo "$json_data" | jq -c ".choices[0].delta.tool_calls[$i]" 2>/dev/null)
+                                    delta_tc=$(printf '%s' "$json_data" | jq -c ".choices[0].delta.tool_calls[$i]" 2>/dev/null)
                                     local merged_tc
-                                    merged_tc=$(echo "${current_tool_calls[$idx]}" "$delta_tc" | jq -s '
+                                    merged_tc=$(printf '%s\n%s\n' "${current_tool_calls[$idx]}" "$delta_tc" | jq -s '
                                         .[0] as $base | .[1] as $delta |
                                         $base |
                                         if $delta.id then .id = $delta.id else . end |
@@ -1189,31 +1197,31 @@ oai_make_request() {
                 response_raw=$(cat "$response_file")
                 rm -f "$response_file"
 
-                http_code=$(echo "$response_raw" | tail -n 1)
+                http_code=$(printf '%s' "$response_raw" | tail -n 1)
                 local response
-                response=$(echo "$response_raw" | sed '$d')
+                response=$(printf '%s' "$response_raw" | sed '$d')
 
                 if [[ -n "$response" ]]; then
                     local error_msg
-                    error_msg=$(echo "$response" | jq -r '.error.message // empty' 2>/dev/null)
+                    error_msg=$(printf '%s' "$response" | jq -r '.error.message // empty' 2>/dev/null)
                     if [[ -n "$error_msg" ]]; then
                         api_error="$error_msg"
                     else
                         local message_json
-                        message_json=$(echo "$response" | jq -c '.choices[0].message // empty' 2>/dev/null)
+                        message_json=$(printf '%s' "$response" | jq -c '.choices[0].message // empty' 2>/dev/null)
                         if [[ -n "$message_json" ]]; then
-                            response_content=$(echo "$message_json" | jq -j '.content // empty' 2>/dev/null; printf x)
+                            response_content=$(printf '%s' "$message_json" | jq -j '.content // empty' 2>/dev/null; printf x)
                             response_content="${response_content%x}"
-                            reasoning_content=$(echo "$message_json" | jq -j '.reasoning_content // empty' 2>/dev/null; printf x)
+                            reasoning_content=$(printf '%s' "$message_json" | jq -j '.reasoning_content // empty' 2>/dev/null; printf x)
                             reasoning_content="${reasoning_content%x}"
 
                             local tc_count
-                            tc_count=$(echo "$message_json" | jq '(.tool_calls // []) | length' 2>/dev/null)
+                            tc_count=$(printf '%s' "$message_json" | jq '(.tool_calls // []) | length' 2>/dev/null)
                             if [[ "$tc_count" =~ ^[0-9]+$ ]] && [[ "$tc_count" -gt 0 ]]; then
                                 has_tool_calls=true
                                 for ((i=0; i<tc_count; i++)); do
                                     local tc_json
-                                    tc_json=$(echo "$message_json" | jq -c ".tool_calls[$i]" 2>/dev/null)
+                                    tc_json=$(printf '%s' "$message_json" | jq -c ".tool_calls[$i]" 2>/dev/null)
                                     if [[ -n "$tc_json" ]]; then
                                         current_tool_calls[$i]="$tc_json"
                                     fi
@@ -1306,40 +1314,51 @@ oai_make_request() {
                 fi
             fi
 
-            # Format accumulated tool calls
+            # Format accumulated tool calls using jq -s to bypass ARG_MAX limits
             local final_tool_calls="[]"
-            for tc in "${current_tool_calls[@]}"; do
-                if [[ -n "$tc" && "$tc" != "null" ]]; then
-                    final_tool_calls=$(echo "$final_tool_calls" | jq --argjson tc "$tc" '. + [$tc]')
-                fi
-            done
+            if [[ ${#current_tool_calls[@]} -gt 0 ]]; then
+                final_tool_calls=$(printf '%s\n' "${current_tool_calls[@]}" | jq -s '[.[] | select(. != null and . != "")]')
+            fi
 
-            # Append assistant message with tool_calls to history
+            # Append assistant message with tool_calls to history using temporary files for safety
             local assistant_msg
-            if [[ -n "$response_content" ]]; then
-                assistant_msg=$(jq -n --arg content "$response_content" --argjson tool_calls "$final_tool_calls" '{role: "assistant", content: $content, tool_calls: $tool_calls}')
-            else
-                assistant_msg=$(jq -n --argjson tool_calls "$final_tool_calls" '{role: "assistant", tool_calls: $tool_calls}')
-            fi
+            local tmp_tc=$(mktemp)
+            printf '%s' "$final_tool_calls" > "$tmp_tc"
 
+            local tmp_reasoning="/dev/null"
             if [[ -n "$reasoning_content" ]]; then
-                assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
+                tmp_reasoning=$(mktemp)
+                printf '%s' "$reasoning_content" > "$tmp_reasoning"
             fi
 
+            if [[ -n "$response_content" ]]; then
+                assistant_msg=$(printf '%s' "$response_content" | jq -Rs \
+                    --slurpfile tc "$tmp_tc" \
+                    --rawfile rc "$tmp_reasoning" \
+                    '{role: "assistant", content: ., tool_calls: ($tc[0] // [])} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
+            else
+                assistant_msg=$(jq -n \
+                    --slurpfile tc "$tmp_tc" \
+                    --rawfile rc "$tmp_reasoning" \
+                    '{role: "assistant", tool_calls: ($tc[0] // [])} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
+            fi
+
+            [[ "$tmp_reasoning" != "/dev/null" ]] && rm -f "$tmp_reasoning"
+            rm -f "$tmp_tc"
             CONVERSATION+=("$assistant_msg")
 
             # Execute each tool call sequentially
             local tc_length
-            tc_length=$(echo "$final_tool_calls" | jq 'length')
+            tc_length=$(printf '%s' "$final_tool_calls" | jq 'length')
             for ((i=0; i<tc_length; i++)); do
                 local tc_id func_name args_json tc_json
-                tc_id=$(echo "$final_tool_calls" | jq -r ".[$i].id")
-                func_name=$(echo "$final_tool_calls" | jq -r ".[$i].function.name")
-                args_json=$(echo "$final_tool_calls" | jq -r ".[$i].function.arguments")
-                tc_json=$(echo "$final_tool_calls" | jq -c ".[$i]")
+                tc_id=$(printf '%s' "$final_tool_calls" | jq -r ".[$i].id")
+                func_name=$(printf '%s' "$final_tool_calls" | jq -r ".[$i].function.name")
+                args_json=$(printf '%s' "$final_tool_calls" | jq -r ".[$i].function.arguments")
+                tc_json=$(printf '%s' "$final_tool_calls" | jq -c ".[$i]")
 
                 printf "%s[TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
-                echo "$tc_json" | jq $JQ_COLOR_FLAG .
+                printf '%s' "$tc_json" | jq $JQ_COLOR_FLAG .
                 printf "%s[/TOOL_CALL]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
                 printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
@@ -1360,13 +1379,9 @@ oai_make_request() {
                 fi
                 printf "%s[/TOOL_RESPONSE]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
 
-                # Append tool response to history for next API call
+                # Append tool response to history for next API call safely via stdin
                 local tool_msg
-                tool_msg=$(jq -n \
-                    --arg role "tool" \
-                    --arg content "$tool_output" \
-                    --arg tool_call_id "$tc_id" \
-                    '{role: $role, content: $content, tool_call_id: $tool_call_id}')
+                tool_msg=$(printf '%s' "$tool_output" | jq -Rs --arg tool_call_id "$tc_id" '{role: "tool", content: ., tool_call_id: $tool_call_id}')
                 CONVERSATION+=("$tool_msg")
             done
 
@@ -1375,10 +1390,23 @@ oai_make_request() {
         else
             # No tool calls: append final assistant message and finish request
             local assistant_msg
-            assistant_msg=$(jq -n --arg content "$response_content" '{role: "assistant", content: $content}')
+            local tmp_reasoning="/dev/null"
             if [[ -n "$reasoning_content" ]]; then
-                assistant_msg=$(echo "$assistant_msg" | jq --arg rc "$reasoning_content" '. + {reasoning_content: $rc}')
+                tmp_reasoning=$(mktemp)
+                printf '%s' "$reasoning_content" > "$tmp_reasoning"
             fi
+
+            if [[ -n "$response_content" ]]; then
+                assistant_msg=$(printf '%s' "$response_content" | jq -Rs \
+                    --rawfile rc "$tmp_reasoning" \
+                    '{role: "assistant", content: .} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
+            else
+                assistant_msg=$(jq -n \
+                    --rawfile rc "$tmp_reasoning" \
+                    '{role: "assistant"} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
+            fi
+            [[ "$tmp_reasoning" != "/dev/null" ]] && rm -f "$tmp_reasoning"
+
             CONVERSATION+=("$assistant_msg")
             printf "\n"
             break
@@ -1426,11 +1454,11 @@ main() {
         # Handle dump command for debugging
         if [[ "$message" == "/dump" ]]; then
             local messages_json="[]"
-            for msg in "${CONVERSATION[@]}"; do
-                messages_json=$(echo "$messages_json" | jq --argjson msg "$msg" '. + [$msg]')
-            done
+            if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
+                messages_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
+            fi
             echo "${COLOR_DIM}[CONVERSATION]${COLOR_RESET}"
-            echo "$messages_json" | jq $JQ_COLOR_FLAG .
+            printf '%s' "$messages_json" | jq $JQ_COLOR_FLAG .
             echo "${COLOR_DIM}[/CONVERSATION]${COLOR_RESET}"
             continue
         fi
@@ -1440,7 +1468,7 @@ main() {
             if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
                 local last_msg="${CONVERSATION[-1]}"
                 echo "${COLOR_DIM}[MESSAGE]${COLOR_RESET}"
-                echo "$last_msg" | jq $JQ_COLOR_FLAG .
+                printf '%s' "$last_msg" | jq $JQ_COLOR_FLAG .
                 echo "${COLOR_DIM}[/MESSAGE]${COLOR_RESET}"
                 unset 'CONVERSATION[-1]'
             else
