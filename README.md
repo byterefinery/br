@@ -90,6 +90,7 @@ rm -rf build ; git pull ; cmake -B build -DGGML_VULKAN=ON && cmake --build build
     --tools all \
     --ui
 ```
+
 ### empero-ai/Qwythos-9B-v2
 
 ```bash
@@ -98,7 +99,7 @@ rm -rf build ; git pull ; cmake -B build -DGGML_VULKAN=ON && cmake --build build
     --alias 'empero-ai/Qwythos-9B-v2' \
     -ngl -1 \
     -np 1 \
-    --temp 0.6 --top-p 0.95 --top-k 20 --repeat-penalty 1.05 -n 16384 -c 131072 -fa on \
+    --temp 0.6 --top-p 0.95 --top-k 20 -n 16384 -c 131072 -fa on \
     -ctk q4_1 -ctv q4_1 \
     --no-mmproj-offload \
     --spec-default \
@@ -122,6 +123,24 @@ rm -rf build ; git pull ; cmake -B build -DGGML_VULKAN=ON && cmake --build build
     --no-mmproj-offload \
     --spec-default \
     --spec-type draft-mtp --spec-draft-n-max 3 \
+    --reasoning on \
+    --chat-template-kwargs '{"preserve_thinking": true}' \
+    --tools all \
+    --ui
+```
+
+### prism-ml/Ternary-Bonsai-27B
+
+```bash
+~/llama.cpp/build/bin/llama-server \
+    -hf 'prism-ml/Ternary-Bonsai-27B-gguf:Q2_g64' \
+    --alias 'prism-ml/Ternary-Bonsai-27B' \
+    -ngl -1 \
+    -np 1 \
+    --temp 0.7 --top-p 0.95 --top-k 20 -n 16384 -c 131072 -fa on \
+    -ctk q4_1 -ctv q4_1 \
+    --no-mmproj-offload \
+    --spec-default \
     --reasoning on \
     --chat-template-kwargs '{"preserve_thinking": true}' \
     --tools all \
