@@ -13,15 +13,16 @@ import os
 import re
 import sys
 import textwrap
+import unicodedata
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-NAME_RE = re.compile(r'^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$')
 MAX_NAME_LEN = 64
 MAX_DESC_LEN = 1024
+MAX_COMPATIBILITY_LEN = 500
 
 FRONTMATTER_RE = re.compile(
     r'^---\s*\n(?P<content>.*?)^---\s*\n', re.MULTILINE | re.DOTALL
@@ -69,6 +70,92 @@ description: {description}
 # Matches trailing version suffix: -<digit>[-<digit>]* at end of dir name
 # e.g. "demo-skill-2-4-1" -> "2-4-1", "git-8-20-0" -> "8-20-0"
 VERSION_SUFFIX_RE = re.compile(r'-(\d+(?:-\d+)+)$')
+
+
+# ---------------------------------------------------------------------------
+# Token estimation
+# ---------------------------------------------------------------------------
+# Char-per-token ratios based on tokenizer behavior (GPT-4 / Claude):
+#   English prose:      ~4.0 chars/token
+#   Code:               ~1.5–2.5 chars/token
+#   CJK (Chinese/Japanese/Korean): ~1.0–1.5 chars/token
+#   Mixed (prose + code fences + markdown): ~3.0–3.5 chars/token
+# We use conservative (low) ratios so the estimate never undercounts.
+
+_CHARS_PER_TOKEN_PROSE = 3.5
+_CHARS_PER_TOKEN_CODE = 2.0
+_CHARS_PER_TOKEN_CJK = 1.2
+
+_CJK_RE = re.compile(
+    r'['
+    r'\u3000-\u303f'   # CJK symbols and punctuation
+    r'\u3040-\u309f'   # Hiragana
+    r'\u30a0-\u30ff'   # Katakana
+    r'\u4e00-\u9fff'   # CJK unified ideographs
+    r'\uf900-\ufaff'   # CJK compatibility ideographs
+    r'\uac00-\ud7af'   # Hangul syllables
+    r']'
+)
+
+
+def _estimate_tokens(text):
+    """Estimate the number of tokens in *text*.
+
+    Splits the text into prose regions and fenced code blocks, applying
+    different char-per-token ratios.  Returns an integer token count.
+
+    The estimate is conservative (tends to overcount slightly) so that
+    warnings trigger early rather than late.
+    """
+    if not text:
+        return 0
+
+    total = 0
+    in_fence = False
+    fence_chars = 0
+    current_chunk = []
+
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith('```'):
+            # Flush accumulated chunk before toggling fence state
+            if current_chunk:
+                total += _chars_to_tokens(''.join(current_chunk), in_code=False)
+                current_chunk = []
+            in_fence = not in_fence
+            fence_chars += len(line)
+            continue
+
+        current_chunk.append(line)
+
+    # Flush remaining chunk
+    if current_chunk:
+        total += _chars_to_tokens(''.join(current_chunk), in_code=in_fence)
+
+    # Fence delimiters themselves count as tokens too
+    total += fence_chars // 3
+
+    return max(1, total)
+
+
+def _chars_to_tokens(text, in_code=False):
+    """Convert a chunk of text to an estimated token count."""
+    chars = len(text)
+    if chars == 0:
+        return 0
+
+    # Check for CJK-heavy content
+    cjk_count = len(_CJK_RE.findall(text))
+    cjk_ratio = cjk_count / chars if chars else 0
+
+    if cjk_ratio > 0.3:
+        # CJK-heavy content
+        return max(1, int(chars / _CHARS_PER_TOKEN_CJK))
+
+    if in_code:
+        return max(1, int(chars / _CHARS_PER_TOKEN_CODE))
+
+    return max(1, int(chars / _CHARS_PER_TOKEN_PROSE))
 
 
 # ---------------------------------------------------------------------------
@@ -205,18 +292,37 @@ def _parse_frontmatter(text):
 
 
 def _validate_name(name):
-    """Return list of error strings (empty = valid)."""
+    """Return list of error strings (empty = valid).
+
+    Allows Unicode lowercase letters (i18n), digits, and hyphens.
+    Must not start/end with a hyphen or contain consecutive hyphens.
+    """
     errors = []
     if not name:
         errors.append("name is missing")
         return errors
+
+    # Normalize Unicode for consistent comparison
+    name = unicodedata.normalize("NFKC", name.strip())
+
     if len(name) > MAX_NAME_LEN:
         errors.append(f"name exceeds {MAX_NAME_LEN} characters ({len(name)})")
-    if not NAME_RE.match(name):
+
+    if name != name.lower():
+        errors.append("name must be lowercase")
+
+    if name.startswith("-") or name.endswith("-"):
+        errors.append("name cannot start or end with a hyphen")
+
+    if "--" in name:
+        errors.append("name cannot contain consecutive hyphens")
+
+    if not all(c.isalnum() or c == "-" for c in name):
         errors.append(
-            "name must be lowercase letters, numbers, and hyphens only; "
+            "name must contain only letters, digits, and hyphens; "
             "no leading/trailing/consecutive hyphens"
         )
+
     return errors
 
 
@@ -266,6 +372,19 @@ def _validate_metadata(metadata):
     return warnings
 
 
+def _validate_compatibility(compat):
+    """Return list of error strings for the optional compatibility field."""
+    errors = []
+    if not isinstance(compat, str):
+        errors.append("compatibility must be a string")
+        return errors
+    if len(compat) > MAX_COMPATIBILITY_LEN:
+        errors.append(
+            f"compatibility exceeds {MAX_COMPATIBILITY_LEN} characters ({len(compat)})"
+        )
+    return errors
+
+
 def _validate_frontmatter(fm):
     """Return list of error strings for the full frontmatter."""
     errors = []
@@ -273,6 +392,9 @@ def _validate_frontmatter(fm):
     errors.extend(_validate_name(name))
     desc = fm.get('description', None) if fm else None
     errors.extend(_validate_description(desc))
+    compat = fm.get('compatibility') if fm else None
+    if compat is not None:
+        errors.extend(_validate_compatibility(compat))
     return errors
 
 
@@ -730,12 +852,21 @@ def _validate_single_skill(skill_path, strict):
             results.append(("PASS", "description is valid"))
 
         # Unknown fields
-        known_fields = {'name', 'description', 'metadata'}
+        known_fields = {'name', 'description', 'license', 'compatibility', 'allowed-tools', 'metadata'}
         unknown = set(fm.keys()) - known_fields
         if unknown:
             results.append(("WARN", f"unknown frontmatter fields: {', '.join(sorted(unknown))}"))
         else:
             results.append(("PASS", "no unknown frontmatter fields"))
+
+        # Compatibility validation
+        compat = fm.get('compatibility')
+        if compat is not None:
+            compat_errors = _validate_compatibility(compat)
+            for e in compat_errors:
+                results.append(("ERROR", f"compatibility: {e}"))
+            if not compat_errors:
+                results.append(("PASS", "compatibility is valid"))
 
         # Metadata validation (optional)
         metadata = fm.get('metadata')
@@ -780,7 +911,6 @@ def _validate_single_skill(skill_path, strict):
 
     # --- Body checks ---
     body_lines = body.splitlines()
-    body_line_count = len(body_lines)
 
     # Level-1 heading
     first_content_line = None
@@ -810,13 +940,14 @@ def _validate_single_skill(skill_path, strict):
                  f"'#{expected_h1}' (must be '# <name>' or '# <name> <version>')")
             )
 
-    # Line count
-    if body_line_count > 500:
+    # Token estimation
+    estimated_tokens = _estimate_tokens(body)
+    if estimated_tokens > 5000:
         results.append(
-            ("WARN", f"body has {body_line_count} lines (recommended: under 500)")
+            ("WARN", f"body is ~{estimated_tokens} tokens (recommended: under 5000)")
         )
     else:
-        results.append(("PASS", f"body has {body_line_count} lines (under 500)"))
+        results.append(("PASS", f"body is ~{estimated_tokens} tokens (under 5000)"))
 
     # Section checks
     sec_errors, sec_warnings = _check_sections(body)
@@ -1012,8 +1143,13 @@ def cmd_info(args):
             tags = metadata.get('tags', [])
             if tags:
                 print(f"  metadata.tags: {', '.join(tags)}")
+        # Show optional standard fields
+        for key in ('license', 'compatibility', 'allowed-tools'):
+            val = fm.get(key)
+            if val is not None:
+                print(f"  {key}: {val}")
         # Show any extra fields
-        known_fields = {'name', 'description', 'metadata'}
+        known_fields = {'name', 'description', 'license', 'compatibility', 'allowed-tools', 'metadata'}
         extra = set(fm.keys()) - known_fields
         for key in sorted(extra):
             print(f"  {key}: {fm[key]}")
@@ -1033,9 +1169,11 @@ def cmd_info(args):
             headings.append(stripped)
     line_count = len(body_lines)
     word_count = len(body.split())
+    token_count = _estimate_tokens(body)
 
     print(f"  body lines: {line_count}")
     print(f"  body words: {word_count}")
+    print(f"  body tokens: ~{token_count}")
     if headings:
         print("  headings:")
         for h in headings:
