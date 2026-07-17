@@ -35,7 +35,7 @@ Environment Variables:
   BR_MODEL_NAME    Model name to use
   BR_MODEL_INPUT   Model input type (default: text)
   BR_MODEL_STREAM  Enable streaming (default: true)
-  BR_TIMEOUT       Request timeout in seconds (default: 60)
+  BR_TIMEOUT       Request timeout in seconds (default: 600)
   BR_RETRIES       Maximum number of retries on failure (default: 100)
 EOF
     exit 0
@@ -74,7 +74,7 @@ export BR_API_KEY="${BR_API_KEY:-}"                           # sk-...
 export BR_MODEL_NAME="${BR_MODEL_NAME:-}"                     # ORG/MODEL
 export BR_MODEL_INPUT="${BR_MODEL_INPUT:-text}"               # text,image
 export BR_MODEL_STREAM="${BR_MODEL_STREAM:-true}"             # true or false
-export BR_TIMEOUT="${BR_TIMEOUT:-60}"                         # Timeout in seconds
+export BR_TIMEOUT="${BR_TIMEOUT:-600}"                        # Timeout in seconds
 export BR_RETRIES="${BR_RETRIES:-100}"                        # Max retries
 
 # Global conversation history as array of JSON strings
@@ -100,7 +100,7 @@ print_config_and_headers() {
     local model_name_val="${BR_MODEL_NAME:-(empty)}"
     local model_input_val="${BR_MODEL_INPUT:-text}"
     local model_stream_val="${BR_MODEL_STREAM:-true}"
-    local timeout_val="${BR_TIMEOUT:-60}"
+    local timeout_val="${BR_TIMEOUT:-600}"
     local retries_val="${BR_RETRIES:-100}"
 
     echo "Configuration:"
@@ -148,7 +148,7 @@ read_env_vars() {
 
     # Validate timeout and retries as integers
     if ! [[ "$BR_TIMEOUT" =~ ^[0-9]+$ ]]; then
-        export BR_TIMEOUT=60
+        export BR_TIMEOUT=600
     fi
     if ! [[ "$BR_RETRIES" =~ ^[0-9]+$ ]]; then
         export BR_RETRIES=100
@@ -532,11 +532,9 @@ exec_shell_command() {
 agent_skills_system() {
     cat <<'EOF'
 # Agent Skills System
-
 Skills are self-contained packages that give you specialized capabilities. They follow progressive disclosure — only load what you need for the current task.
 
 ## Strict Rules (Must Follow)
-
 Always use the dedicated skill tools to interact with skills:
 - `list_skills` — list all available skills
 - `load_skill` — load a skill
@@ -545,7 +543,6 @@ Always use the dedicated skill tools to interact with skills:
 - `exec_skill_script` — execute skill's script
 
 ## Directory Structure
-
 Each skill lives in `.agents/skills/<skill_name>/` and contains:
 - `SKILL.md` — Main file with instructions (required)
 - `references/` — Documents you can read when needed using `read_skill_resource`
@@ -553,7 +550,6 @@ Each skill lives in `.agents/skills/<skill_name>/` and contains:
 - `assets/` — Templates and other files — never read or run them
 
 ## How to Work With Skills
-
 1. Call `list_skills` to discover skills.
 2. Call `load_skill(skill_name)` when a skill matches the task.
 3. Call `list_skill_files(skill_name)` to explore the skill's contents.
@@ -1002,7 +998,8 @@ oai_make_request() {
                 local tmp_pipe=$(mktemp -u)
                 mkfifo "$tmp_pipe"
 
-                curl -s -N -w "\n%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$tmp_pipe" &
+                # Added --speed-time 30 --speed-limit 1 to abort if no data received for 30s
+                curl -s -N -w "\n%{http_code}" --max-time "$BR_TIMEOUT" --speed-time 30 --speed-limit 1 "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$tmp_pipe" &
                 local CURL_PID=$!
 
                 local DONE_RECEIVED=false

@@ -165,6 +165,26 @@ rm -rf build ; git pull ; cmake -B build -DGGML_VULKAN=ON && cmake --build build
     --ui
 ```
 
+### Qwen/Qwen3.6-27B
+
+```bash
+~/llama.cpp/build/bin/llama-server \
+    -hf 'unsloth/Qwen3.6-27B-MTP-GGUF:Q4_K_XL' \
+    --alias 'Qwen/Qwen3.6-27B' \
+    -ngl -1 \
+    -np 1 \
+    --temp 0.6 --top-p 0.95 --top-k 20 -c 262144 -fa on \
+    -ctk q4_1 -ctv q4_1 \
+    --no-mmproj-offload \
+    --spec-default \
+    --spec-type draft-mtp --spec-draft-n-max 2 \
+    --reasoning on \
+    --reasoning-preserve \
+    --chat-template-kwargs '{"preserve_thinking": true}' \
+    --tools all \
+    --ui
+```
+
 ### curl examples
 
 Test streaming response:
