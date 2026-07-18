@@ -1297,7 +1297,9 @@ list_skills() {
         desc=$(printf '%s' "$frontmatter" | grep '^description:' | head -1 | sed 's/^description:[[:space:]]*//' | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')
         [[ -z "$name" ]] && name="$skill_name"
         [[ -z "$desc" ]] && desc="(no description)"
-        skill_jsons+=($(jq -c -n --arg name "$name" --arg desc "$desc" --arg path "$skill_dir" '{"name": $name, "description": $desc, "skill_path": $path}'))
+        local skill_json
+        skill_json=$(jq -c -n --arg name "$name" --arg desc "$desc" --arg path "$skill_dir" '{"name": $name, "description": $desc, "skill_path": $path}')
+        skill_jsons+=("$skill_json")
     done < <(find "$skills_dir" -mindepth 2 -name "SKILL.md" -print0 2>/dev/null)
     if [[ ${#skill_jsons[@]} -eq 0 ]]; then echo "[]"; else printf '%s\n' "${skill_jsons[@]}" | jq -s '.'; fi
 }
