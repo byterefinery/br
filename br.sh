@@ -52,7 +52,7 @@ else
     JQ_COLOR_FLAG=""
 fi
 
-# Enable standard readline editing mode
+# Enable standard readline editing mode (emacs) so UP/DOWN navigate history
 set -o emacs
 
 # READLINE BINDINGS
@@ -942,6 +942,28 @@ Summary:"
     printf "%sSummary:%s %s\n\n" "${COLOR_DIM}" "${COLOR_RESET}" "$summary"
 }
 
+# Check for standalone ESC key to interrupt generation.
+# Consumes UP/DOWN and other escape sequences so they don't interrupt or pollute input.
+check_esc_interrupt() {
+    local timeout="${1:-0.001}"
+    local key k2 k3
+    if ! IFS= read -t "$timeout" -n 1 key 2>/dev/null; then
+        return 1
+    fi
+    if [[ "$key" != $'\e' ]]; then
+        return 1
+    fi
+    # ESC pressed. Check if it's an escape sequence (like UP/DOWN arrows).
+    if IFS= read -t 0.01 -n 1 k2 2>/dev/null; then
+        if [[ "$k2" == "[" || "$k2" == "O" ]]; then
+            IFS= read -t 0.01 -n 1 k3 2>/dev/null # Consume 3rd char (e.g., A, B)
+        fi
+        return 1 # It's an escape sequence, not an interrupt
+    else
+        return 0 # Standalone ESC key, interrupt!
+    fi
+}
+
 oai_make_request() {
     local user_message="$1"
 
@@ -1007,11 +1029,9 @@ oai_make_request() {
                 local sse_buffer=""
                 while true; do
                     # Check for ESC key (Interrupt)
-                    if IFS= read -t 0.001 -n 1 key 2>/dev/null; then
-                        if [[ "$key" == $'\e' ]]; then
-                            INTERRUPTED=true
-                            break
-                        fi
+                    if check_esc_interrupt 0.001; then
+                        INTERRUPTED=true
+                        break
                     fi
 
                     # Read from curl stream (non-blocking with short timeout)
@@ -1172,12 +1192,10 @@ oai_make_request() {
                 local CURL_PID=$!
 
                 while kill -0 "$CURL_PID" 2>/dev/null; do
-                    if IFS= read -t 0.1 -n 1 key 2>/dev/null; then
-                        if [[ "$key" == $'\e' ]]; then
-                            INTERRUPTED=true
-                            kill "$CURL_PID" 2>/dev/null
-                            break
-                        fi
+                    if check_esc_interrupt 0.1; then
+                        INTERRUPTED=true
+                        kill "$CURL_PID" 2>/dev/null
+                        break
                     fi
                 done
                 wait "$CURL_PID" 2>/dev/null
@@ -1411,6 +1429,34 @@ oai_make_request() {
     done
 }
 
+# Initialize persistent input history for UP/DOWN arrow navigation.
+# `read -e` uses readline, which navigates bash's in-memory history list.
+# We preload from a file and append each accepted input so it survives restarts.
+init_input_history() {
+    BR_HIST_DIR="${HOME}/.config/br"
+    BR_HIST_FILE="${BR_HIST_DIR}/history"
+    mkdir -p "$BR_HIST_DIR" 2>/dev/null
+
+    # Point bash history at our file and cap sizes.
+    HISTFILE="$BR_HIST_FILE"
+    HISTSIZE=1000
+    HISTFILESIZE=1000
+    # Ignore duplicates and commands starting with space; don't strip all.
+    HISTCONTROL="ignorespace:ignoredups"
+
+    # Load prior history into the in-memory list (errors are harmless if file is new).
+    history -r "$BR_HIST_FILE" 2>/dev/null
+}
+
+# Append a single input line to in-memory history and persist to disk.
+# Multi-line inputs are stored as a single history entry by bash.
+append_input_history() {
+    local entry="$1"
+    [[ -z "$entry" ]] && return 0
+    history -s "$entry"          # add to in-memory list (powers UP/DOWN on next read)
+    history -a "$BR_HIST_FILE" 2>/dev/null  # append new entries to disk
+}
+
 main() {
     # Initialize session headers first so they are available for read_env_vars
     SESSION_AFFINITY=$(uuidgen)
@@ -1420,18 +1466,28 @@ main() {
     read_env_vars
     init_conversation
 
+    # Load persistent input history (for UP/DOWN arrow recall)
+    init_input_history
+
     # Main loop
     while true; do
         echo
 
+        # Drain any buffered keystrokes (e.g., UP/DOWN arrows) from the previous generation
+        # so they don't trigger history navigation or commands on the next prompt.
+        while IFS= read -t 0.01 -n 1 -r _ 2>/dev/null; do :; done
+
         # -p: prompt
         # -d $'\r': delimiter to capture embedded newlines
-        # -e: enable readline
+        # -e: enable readline (powers UP/DOWN history navigation)
         # -r: raw input
         read -p "User: " -d $'\r' -e -r message
 
         # Break loop on EOF (Ctrl+D) to prevent infinite empty loops
         [[ -z "$message" ]] && break
+
+        # Save input to history so UP/DOWN can recall it later (skip empty).
+        append_input_history "$message"
 
         # Handle exit commands
         if [[ "$message" == "/exit" || "$message" == "/quit" ]]; then
@@ -1488,17 +1544,35 @@ main() {
             continue
         fi
 
+        # Handle history command - show recent input history
+        if [[ "$message" == "/history" ]]; then
+            echo "${COLOR_DIM}[INPUT HISTORY]${COLOR_RESET}"
+            history 2>/dev/null | sed "s/^/  /"
+            echo "${COLOR_DIM}[/INPUT HISTORY]${COLOR_RESET}"
+            continue
+        fi
+
+        # Handle history clear command - wipes both in-memory and file-backed input history
+        if [[ "$message" == "/history clear" ]]; then
+            history -c 2>/dev/null
+            : > "$BR_HIST_FILE" 2>/dev/null
+            printf "%s[INFO] Input history cleared. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+            continue
+        fi
+
         # Handle help command
         if [[ "$message" == "/help" ]]; then
             echo "${COLOR_DIM}Available commands:${COLOR_RESET}"
-            echo "  /help       Show this help message"
-            echo "  /dump       Print the current conversation history as JSON"
-            echo "  /pop        Pop the last message from conversation history"
-            echo "  /compact    Summarize and compact the conversation history"
-            echo "  /new        Clear conversation history and start a new session (new headers)"
-            echo "  /clear      Clear conversation history but keep current session headers"
-            echo "  /exit       Exit the agent harness"
-            echo "  /quit       Alias for /exit"
+            echo "  /help           Show this help message"
+            echo "  /dump           Print the current conversation history as JSON"
+            echo "  /pop            Pop the last message from conversation history"
+            echo "  /compact        Summarize and compact the conversation history"
+            echo "  /new            Clear conversation history and start a new session (new headers)"
+            echo "  /clear          Clear conversation history but keep current session headers"
+            echo "  /history        Show recent input history (also recallable via UP/DOWN arrows)"
+            echo "  /history clear  Clear all input history records"
+            echo "  /exit           Exit the agent harness"
+            echo "  /quit           Alias for /exit"
             continue
         fi
 
