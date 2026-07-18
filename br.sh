@@ -81,8 +81,8 @@ export BR_RETRIES="${BR_RETRIES:-100}"                        # Max retries
 CONVERSATION=()
 
 # Global session headers for smart HTTP routing
-CONVERSATION_ID=""
 SESSION_AFFINITY=""
+CONVERSATION_ID=""
 
 # Global state for retry logic
 GLOBAL_RETRY_COUNT=1
@@ -112,8 +112,8 @@ print_config_and_headers() {
     echo "  BR_TIMEOUT      : $timeout_val"
     echo "  BR_RETRIES      : $retries_val"
     echo "Headers:"
-    echo "  X-Conversation-Id  : $CONVERSATION_ID"
     echo "  X-Session-Affinity : $SESSION_AFFINITY"
+    echo "  X-Conversation-Id  : $CONVERSATION_ID"
 }
 
 read_env_vars() {
@@ -304,7 +304,7 @@ get_tools_json() {
   {
     "type": "function",
     "function": {
-      "name": "exec_skill_script",
+      "name": "exec_skill_scripts",
       "description": "Execute a script `<skill_name>` (e.g. 'pdf-processing.sh') from a skill's `.agents/skills/<skill_name>/scripts/<script_name>` directory. Use this instead of `exec_shell_command` for skill scripts.",
       "parameters": {
         "type": "object",
@@ -842,7 +842,7 @@ execute_tool() {
 #     2. assistant -> fake reasoning_content + content (acknowledgment).
 compact_conversation() {
     if [[ ${#CONVERSATION[@]} -eq 0 ]]; then
-        echo "Conversation is empty, nothing to compact."
+        printf "%s[INFO] Conversation is empty, nothing to compact. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
         return 0
     fi
 
@@ -860,7 +860,7 @@ compact_conversation() {
     done
 
     if [[ "$found" -eq 0 ]]; then
-        echo "No user/assistant messages to compact."
+        printf "%s[INFO] No user/assistant messages to compact. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
         return 0
     fi
 
@@ -889,8 +889,8 @@ Summary:"
     # Prepare HTTP headers (same as oai_make_request).
     local -a curl_args=()
     curl_args+=("-H" "Content-Type: application/json")
-    curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
     curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
+    curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
     if [[ -n "$BR_API_KEY" ]]; then
         curl_args+=("-H" "Authorization: Bearer $BR_API_KEY")
     fi
@@ -972,8 +972,8 @@ oai_make_request() {
         # Prepare HTTP headers
         local curl_args=()
         curl_args+=("-H" "Content-Type: application/json")
-        curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
         curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
+        curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
         if [[ -n "$BR_API_KEY" ]]; then
             curl_args+=("-H" "Authorization: Bearer $BR_API_KEY")
         fi
@@ -1413,8 +1413,8 @@ oai_make_request() {
 
 main() {
     # Initialize session headers first so they are available for read_env_vars
-    CONVERSATION_ID=$(uuidgen)
     SESSION_AFFINITY=$(uuidgen)
+    CONVERSATION_ID=$(uuidgen)
 
     # Initialize the environment before entering the loop
     read_env_vars
@@ -1438,13 +1438,21 @@ main() {
             break
         fi
 
-        # Handle session reset commands
-        if [[ "$message" == "/new" || "$message" == "/clear" ]]; then
-            echo "Previous session closed."
+        # Handle new session command - reset history and generate fresh session headers
+        if [[ "$message" == "/new" ]]; then
+            printf "%s[INFO] Previous session closed. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
             init_conversation
-            CONVERSATION_ID=$(uuidgen)
             SESSION_AFFINITY=$(uuidgen)
+            CONVERSATION_ID=$(uuidgen)
             print_config_and_headers
+            continue
+        fi
+
+        # Handle clear command - wipe history but keep current session headers
+        # (same conversation from the server's perspective, just empty history)
+        if [[ "$message" == "/clear" ]]; then
+            printf "%s[INFO] Conversation history cleared. Session headers retained. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+            init_conversation
             continue
         fi
 
@@ -1469,7 +1477,7 @@ main() {
                 echo "${COLOR_DIM}[/MESSAGE]${COLOR_RESET}"
                 unset 'CONVERSATION[-1]'
             else
-                echo "Conversation is empty."
+                printf "%s[INFO] Conversation is empty. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
             fi
             continue
         fi
@@ -1487,8 +1495,8 @@ main() {
             echo "  /dump       Print the current conversation history as JSON"
             echo "  /pop        Pop the last message from conversation history"
             echo "  /compact    Summarize and compact the conversation history"
-            echo "  /new        Clear conversation history and start a new session"
-            echo "  /clear      Alias for /new"
+            echo "  /new        Clear conversation history and start a new session (new headers)"
+            echo "  /clear      Clear conversation history but keep current session headers"
             echo "  /exit       Exit the agent harness"
             echo "  /quit       Alias for /exit"
             continue
