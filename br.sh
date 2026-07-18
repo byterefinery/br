@@ -3,6 +3,7 @@
 # Flag parsing
 USE_COLOR=true
 SHOW_HELP=false
+ALLOW_TOOL_CALLS=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -15,6 +16,9 @@ for arg in "$@"; do
         --color)
             USE_COLOR=true
             ;;
+        --allow-tool-calls)
+            ALLOW_TOOL_CALLS=true
+            ;;
     esac
 done
 
@@ -25,9 +29,11 @@ Usage: br.sh [OPTIONS]
 A Bash-based interactive AI agent with tool-calling capabilities.
 
 Options:
-  -h, --help       Show this help message and exit
-      --color      Enable colored output (default)
-      --no-color   Disable colored output
+  -h, --help            Show this help message and exit
+      --color           Enable colored output (default)
+      --no-color        Disable colored output
+      --allow-tool-calls
+                        Allow all tool calls without prompting (default: off)
 
 Environment Variables:
   BR_BASE_URL      Base URL of the OpenAI-compatible API (default: http://localhost:8080/v1)
@@ -153,6 +159,7 @@ print_config_and_headers() {
     echo "  BR_MODEL_STREAM : ${BR_MODEL_STREAM:-true}"
     echo "  BR_TIMEOUT      : ${BR_TIMEOUT:-600}"
     echo "  BR_RETRIES      : ${BR_RETRIES:-100}"
+    echo "  ALLOW_TOOL_CALLS: $ALLOW_TOOL_CALLS"
     echo "Headers:"
     echo "  X-Session-Affinity : $SESSION_AFFINITY (${CUR_SESSION_NAME:-(none)})"
     echo "  X-Conversation-Id  : $CONVERSATION_ID (${CUR_CONV_NAME:-(none)})"
@@ -1487,6 +1494,25 @@ check_esc_interrupt() {
     fi
 }
 
+# Prompt user to approve a tool call. Returns 0 if allowed, 1 otherwise.
+prompt_tool_call_approval() {
+    local func_name="$1"
+    if [[ "$ALLOW_TOOL_CALLS" == "true" ]]; then
+        return 0
+    fi
+    # Drain buffered keystrokes before prompting
+    while IFS= read -t 0.01 -n 1 -r _ 2>/dev/null; do :; done
+    local confirm=""
+    printf "%s[APPROVAL]%s Allow tool call '%s'? [y/n]: " "${COLOR_DIM}" "${COLOR_RESET}" "$func_name"
+    read -n 1 -r confirm
+    echo
+    # Accept only explicit 'y' or 'Y'
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+        return 0
+    fi
+    return 1
+}
+
 oai_make_request() {
     local user_message="$1"
 
@@ -1746,16 +1772,28 @@ oai_make_request() {
                 printf "%s[TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf '%s' "$tc_json" | jq $JQ_COLOR_FLAG .
                 printf "%s[/TOOL_CALL]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
-                br_log_info "Executing tool '%s'..." "$func_name"
-                printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
-                printf "%s" "${COLOR_DIM}"
+
+                # Ask user to approve before executing unless --allow-tool-calls was passed
                 local tool_output tool_exit=0
-                tool_output=$(execute_tool "$func_name" "$args_json" 2>&1) || tool_exit=$?
-                if [[ $tool_exit -ne 0 ]]; then
-                    if [[ "$tool_output" != Error:* ]]; then echo "Error: $tool_output"; tool_output="Error: $tool_output"
+                if prompt_tool_call_approval "$func_name"; then
+                    br_log_info "Executing tool '%s'..." "$func_name"
+                    printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                    printf "%s" "${COLOR_DIM}"
+                    tool_output=$(execute_tool "$func_name" "$args_json" 2>&1) || tool_exit=$?
+                    if [[ $tool_exit -ne 0 ]]; then
+                        if [[ "$tool_output" != Error:* ]]; then echo "Error: $tool_output"; tool_output="Error: $tool_output"
+                        else echo "$tool_output"; fi
                     else echo "$tool_output"; fi
-                else echo "$tool_output"; fi
-                printf "%s[/TOOL_RESPONSE]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                    printf "%s[/TOOL_RESPONSE]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                else
+                    # User did not allow tool call: not an error, just inform the LLM
+                    br_log_info "User did not allow tool call '%s'." "$func_name"
+                    tool_output="User did not allow this tool call."
+                    printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                    printf "%s%s%s\n" "${COLOR_DIM}" "$tool_output" "${COLOR_RESET}"
+                    printf "%s[/TOOL_RESPONSE]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                fi
+
                 local tool_msg
                 tool_msg=$(printf '%s' "$tool_output" | jq -Rs --arg tool_call_id "$tc_id" '{role: "tool", content: ., tool_call_id: $tool_call_id}')
                 CONVERSATION+=("$tool_msg")
@@ -1826,6 +1864,11 @@ main() {
     init_input_history
 
     br_log_info "CTRL+C clears input, CTRL+D exits, UP/DOWN navigates history."
+    if [[ "$ALLOW_TOOL_CALLS" == "true" ]]; then
+        br_log_info "Tool calls are auto-approved (--allow-tool-calls)."
+    else
+        br_log_info "Tool calls require approval (press 'y' to allow)."
+    fi
 
     while true; do
         echo
@@ -1935,6 +1978,10 @@ main() {
   /save <conv> <file>               Shorthand for /conv save <conv> <file>
   /load <file>                      Shorthand for /conv load <file>
   /load <file> <conv>               Shorthand for /conv load <file> <conv>
+
+ ${COLOR_DIM}Tool Call Approval:${COLOR_RESET}
+  Tool calls require approval by default. Press 'y' to allow, anything else to deny.
+  Pass --allow-tool-calls to auto-approve all tool calls.
 EOF
             continue
         fi
