@@ -52,6 +52,9 @@ else
     JQ_COLOR_FLAG=""
 fi
 
+# Save terminal state for restoration on exit
+OLD_STTY=$(stty -g 2>/dev/null || true)
+
 # Enable standard readline editing mode (emacs) so UP/DOWN navigate history
 set -o emacs
 
@@ -63,6 +66,23 @@ bind '"\e\n": "\C-v\C-j"'
 bind '"\r": accept-line'
 bind '"\C-m": accept-line'
 bind '"\n": accept-line'
+
+# CTRL+C clears the current input line instead of sending SIGINT
+bind '"\C-c": kill-whole-line'
+
+# Apply TTY settings: disable signal generation on CTRL+C so readline handles it
+# Re-applied before every read because readline restores terminal modes after each input
+apply_tty_settings() {
+    stty -echoctl -isig intr undef 2>/dev/null || true
+}
+
+apply_tty_settings
+
+# Ignore SIGINT as extra protection (stty intr undef already prevents it)
+trap '' SIGINT
+
+# Restore terminal state on exit
+trap 'stty sane; stty "$OLD_STTY" 2>/dev/null || true' EXIT
 
 # Set default values first
 export BR_BASE_URL="${BR_BASE_URL:-http://localhost:8080/v1}"
@@ -401,6 +421,19 @@ br_update_headers() {
     fi
 }
 
+# Check if current session and conversation are valid
+br_check_current() {
+    if [[ -z "$CUR_SESSION_NAME" ]] || [[ -z "${SESSIONS[$CUR_SESSION_NAME]+x}" ]]; then
+        printf "%s[ERROR] No active session. Use /session new or /session resume. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        return 1
+    fi
+    if [[ -z "$CUR_CONV_NAME" ]] || [[ -z "${CONVS["$CUR_SESSION_NAME|$CUR_CONV_NAME"]+x}" ]]; then
+        printf "%s[ERROR] No active conversation. Use /session conv new or /session conv resume. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        return 1
+    fi
+    return 0
+}
+
 # /info
 br_info() {
     print_config_and_headers
@@ -499,7 +532,8 @@ br_session_mv() {
         printf "%s[ERROR] Usage: /session mv <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
     fi
     if [[ -n "${SESSIONS[$new]+x}" ]]; then
-        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"; return 1
+        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"
+        return 1
     fi
     if ! is_valid_name "$new"; then
         printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
@@ -539,7 +573,8 @@ br_session_cp() {
         printf "%s[ERROR] Usage: /session cp <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
     fi
     if [[ -n "${SESSIONS[$new]+x}" ]]; then
-        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"; return 1
+        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"
+        return 1
     fi
     if ! is_valid_name "$new"; then
         printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
@@ -1388,7 +1423,7 @@ Summary:"
     curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
     curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
     if [[ -n "$BR_API_KEY" ]]; then curl_args+=("-H" "Authorization: Bearer $BR_API_KEY"); fi
-    printf "%s[COMPACTING...]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+    printf "%s[INFO] Compacting conversation... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
     local response
     response=$(curl -s --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
     if [[ -z "$response" ]]; then echo "Error: Empty response from LLM server during compaction."; return 1; fi
@@ -1410,7 +1445,7 @@ Summary:"
     summary_assistant_msg=$(printf '%s' "$assistant_content" | jq -Rs --arg rc "$reasoning_text" '{role: "assistant", reasoning_content: $rc, content: .}')
     CONVERSATION=("$summary_user_msg" "$summary_assistant_msg")
     br_sync_msgs
-    printf "%s[COMPACTED]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+    printf "%s[INFO] Conversation compacted. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
     printf "%sSummary:%s %s\n\n" "${COLOR_DIM}" "${COLOR_RESET}" "$summary"
 }
 
@@ -1435,7 +1470,7 @@ oai_make_request() {
     # Ensure valid session/conversation before sending
     br_update_headers
     if [[ -z "$SESSION_AFFINITY" || -z "$CONVERSATION_ID" ]]; then
-        echo "Error: No active session/conversation. Use /session conv new or /session conv resume."
+        printf "%s[ERROR] No active session/conversation. Use /session conv new or /session conv resume. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
         return 1
     fi
 
@@ -1688,6 +1723,7 @@ oai_make_request() {
                 printf "%s[TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf '%s' "$tc_json" | jq $JQ_COLOR_FLAG .
                 printf "%s[/TOOL_CALL]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                printf "%s[INFO] Executing tool '%s'... [/INFO]%s\n" "${COLOR_DIM}" "$func_name" "${COLOR_RESET}"
                 printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf "%s" "${COLOR_DIM}"
                 local tool_output tool_exit=0
@@ -1766,17 +1802,36 @@ main() {
     init_conversation
     init_input_history
 
+    printf "%s[INFO] CTRL+C clears input, CTRL+D exits, UP/DOWN navigates history. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+
     while true; do
         echo
         # Drain buffered keystrokes
         while IFS= read -t 0.01 -n 1 -r _ 2>/dev/null; do :; done
 
-        read -p "User: " -d $'\r' -e -r message
-        [[ -z "$message" ]] && break
+        # Re-apply TTY settings before each read (readline restores terminal modes)
+        apply_tty_settings
+        read -r -e -p "User: " message
+        status=$?
+
+        # CTRL+D (EOF) exits
+        if [ "$status" -ne 0 ]; then
+            printf "\n%s[INFO] EOF received. Exiting. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+            break
+        fi
+
+        # Empty input: just re-prompt
+        if [ -z "$message" ]; then
+            continue
+        fi
+
         append_input_history "$message"
 
         # Exit
-        if [[ "$message" == "/exit" || "$message" == "/quit" ]]; then break; fi
+        if [[ "$message" == "/exit" || "$message" == "/quit" ]]; then
+            printf "%s[INFO] Exiting. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+            break
+        fi
 
         # /info
         if [[ "$message" == "/info" ]]; then br_info; continue; fi
@@ -1860,8 +1915,9 @@ EOF
             continue
         fi
 
-        # /dump
+        # /dump - check session/conversation exists
         if [[ "$message" == "/dump" ]]; then
+            if ! br_check_current; then continue; fi
             local messages_json="[]"
             if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
                 messages_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
@@ -1872,22 +1928,25 @@ EOF
             continue
         fi
 
-        # /pop
+        # /pop - check session/conversation exists
         if [[ "$message" == "/pop" ]]; then
+            if ! br_check_current; then continue; fi
             if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
                 echo "${COLOR_DIM}[MESSAGE]${COLOR_RESET}"
                 printf '%s' "${CONVERSATION[-1]}" | jq $JQ_COLOR_FLAG .
                 echo "${COLOR_DIM}[/MESSAGE]${COLOR_RESET}"
                 unset 'CONVERSATION[-1]'
                 br_sync_msgs
+                printf "%s[INFO] Popped last message from conversation. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
             else
                 printf "%s[INFO] Conversation is empty. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
             fi
             continue
         fi
 
-        # /compact
+        # /compact - check session/conversation exists
         if [[ "$message" == "/compact" ]]; then
+            if ! br_check_current; then continue; fi
             compact_conversation; continue
         fi
 
@@ -1958,7 +2017,8 @@ EOF
                 ;;
         esac
 
-        # Send to LLM
+        # Send to LLM - check session/conversation exists
+        if ! br_check_current; then continue; fi
         echo
         echo -n "Assistant: "
         oai_make_request "$message"
