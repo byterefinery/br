@@ -56,28 +56,32 @@ fi
 set -o emacs
 
 # READLINE BINDINGS
-# Ctrl+K then Ctrl+J: Insert literal newline
 bind '"\C-k\C-j": "\C-v\C-j"'
-# Ctrl+J: Accept input (Send)
 bind '"\C-j": accept-line'
-# Alt+Enter: Insert literal newline (ESC + Return/LineFeed)
 bind '"\e\r": "\C-v\C-j"'
 bind '"\e\n": "\C-v\C-j"'
-# Enter: Accept input (Return, Ctrl+M, or LineFeed)
 bind '"\r": accept-line'
 bind '"\C-m": accept-line'
 bind '"\n": accept-line'
 
 # Set default values first
-export BR_BASE_URL="${BR_BASE_URL:-http://localhost:8080/v1}" # OAI compatible API
-export BR_API_KEY="${BR_API_KEY:-}"                           # sk-...
-export BR_MODEL_NAME="${BR_MODEL_NAME:-}"                     # ORG/MODEL
-export BR_MODEL_INPUT="${BR_MODEL_INPUT:-text}"               # text,image
-export BR_MODEL_STREAM="${BR_MODEL_STREAM:-true}"             # true or false
-export BR_TIMEOUT="${BR_TIMEOUT:-600}"                        # Timeout in seconds
-export BR_RETRIES="${BR_RETRIES:-100}"                        # Max retries
+export BR_BASE_URL="${BR_BASE_URL:-http://localhost:8080/v1}"
+export BR_API_KEY="${BR_API_KEY:-}"
+export BR_MODEL_NAME="${BR_MODEL_NAME:-}"
+export BR_MODEL_INPUT="${BR_MODEL_INPUT:-text}"
+export BR_MODEL_STREAM="${BR_MODEL_STREAM:-true}"
+export BR_TIMEOUT="${BR_TIMEOUT:-600}"
+export BR_RETRIES="${BR_RETRIES:-100}"
 
-# Global conversation history as array of JSON strings
+# Session/Conversation state (global associative arrays)
+declare -A SESSIONS    # SESSIONS[name]=session_uuid
+declare -A CONVS       # CONVS["session|conv"]=conv_uuid
+declare -A MSGS        # MSGS["session|conv"]="[json array of messages]"
+
+CUR_SESSION_NAME=""
+CUR_CONV_NAME=""
+
+# Global conversation history as array of JSON strings (reflects current conv)
 CONVERSATION=()
 
 # Global session headers for smart HTTP routing
@@ -88,6 +92,11 @@ CONVERSATION_ID=""
 GLOBAL_RETRY_COUNT=1
 GLOBAL_RETRY_DELAY=2
 
+# Generate lowercase UUID
+gen_uuid() {
+    uuidgen | tr '[:upper:]' '[:lower:]'
+}
+
 # Print configuration and session headers
 print_config_and_headers() {
     local masked_api_key
@@ -97,29 +106,21 @@ print_config_and_headers() {
         masked_api_key="(empty)"
     fi
 
-    local model_name_val="${BR_MODEL_NAME:-(empty)}"
-    local model_input_val="${BR_MODEL_INPUT:-text}"
-    local model_stream_val="${BR_MODEL_STREAM:-true}"
-    local timeout_val="${BR_TIMEOUT:-600}"
-    local retries_val="${BR_RETRIES:-100}"
-
     echo "Configuration:"
     echo "  BR_BASE_URL     : $BR_BASE_URL"
     echo "  BR_API_KEY      : $masked_api_key"
-    echo "  BR_MODEL_NAME   : $model_name_val"
-    echo "  BR_MODEL_INPUT  : $model_input_val"
-    echo "  BR_MODEL_STREAM : $model_stream_val"
-    echo "  BR_TIMEOUT      : $timeout_val"
-    echo "  BR_RETRIES      : $retries_val"
+    echo "  BR_MODEL_NAME   : ${BR_MODEL_NAME:-(empty)}"
+    echo "  BR_MODEL_INPUT  : ${BR_MODEL_INPUT:-text}"
+    echo "  BR_MODEL_STREAM : ${BR_MODEL_STREAM:-true}"
+    echo "  BR_TIMEOUT      : ${BR_TIMEOUT:-600}"
+    echo "  BR_RETRIES      : ${BR_RETRIES:-100}"
     echo "Headers:"
-    echo "  X-Session-Affinity : $SESSION_AFFINITY"
-    echo "  X-Conversation-Id  : $CONVERSATION_ID"
+    echo "  X-Session-Affinity : $SESSION_AFFINITY (${CUR_SESSION_NAME:-(none)})"
+    echo "  X-Conversation-Id  : $CONVERSATION_ID (${CUR_CONV_NAME:-(none)})"
 }
 
 read_env_vars() {
     local config_file=""
-
-    # Determine which config file to use
     if [[ -f ".env" ]]; then
         config_file=".env"
     elif [[ -f "$HOME/.config/br/config" ]]; then
@@ -128,34 +129,21 @@ read_env_vars() {
         echo "Warning: default values are used instead of config files." >&2
         echo "" >&2
     fi
-
-    # Load from file if a valid path was found
     if [[ -n "$config_file" ]]; then
-        # 'set -a' automatically exports variables assigned in the sourced file
         set -a
         # shellcheck disable=SC1090
         source "$config_file"
         set +a
     fi
-
-    # Parse BR_MODEL_STREAM as boolean (case-insensitive, supports true/false, yes/no, 1/0)
     local model_stream_val="${BR_MODEL_STREAM:-true}"
     case "$model_stream_val" in
         [tT][rR][uU][eE]|[yY][eE][sS]|[yY]|1) model_stream_val="true" ;;
         *) model_stream_val="false" ;;
     esac
     export BR_MODEL_STREAM="$model_stream_val"
-
-    # Validate timeout and retries as integers
-    if ! [[ "$BR_TIMEOUT" =~ ^[0-9]+$ ]]; then
-        export BR_TIMEOUT=600
-    fi
-    if ! [[ "$BR_RETRIES" =~ ^[0-9]+$ ]]; then
-        export BR_RETRIES=100
-    fi
-
-    # Print the active configuration and headers
-    print_config_and_headers
+    if ! [[ "$BR_TIMEOUT" =~ ^[0-9]+$ ]]; then export BR_TIMEOUT=600; fi
+    if ! [[ "$BR_RETRIES" =~ ^[0-9]+$ ]]; then export BR_RETRIES=100; fi
+    br_info
 }
 
 get_tools_json() {
@@ -329,53 +317,798 @@ init_conversation() {
     CONVERSATION=()
 }
 
-read_file() {
-    local args_json="$1"
+# Helper functions
 
-    local path start_line end_line append_loc
-    path=$(printf '%s' "$args_json" | jq -r '.path // empty')
-    if [[ -z "$path" ]]; then
-        echo "Error: 'path' is required for read_file"
+# Validate name: non-empty, no spaces, no pipe
+is_valid_name() {
+    local name="$1"
+    [[ -z "$name" ]] && return 1
+    [[ "$name" == *" "* ]] && return 1
+    [[ "$name" == *"|"* ]] && return 1
+    return 0
+}
+
+# Resolve id-or-name to internal name key
+get_sess_name() {
+    local arg="$1"
+    if [[ -n "${SESSIONS[$arg]+x}" ]]; then echo "$arg"; return 0; fi
+    for name in "${!SESSIONS[@]}"; do
+        if [[ "${SESSIONS[$name]}" == "$arg" ]]; then echo "$name"; return 0; fi
+    done
+    return 1
+}
+
+get_conv_name() {
+    local sess="$1" arg="$2"
+    if [[ -n "${CONVS["$sess|$arg"]+x}" ]]; then echo "$arg"; return 0; fi
+    for key in "${!CONVS[@]}"; do
+        if [[ "$key" == "$sess|"* ]]; then
+            local conv="${key#$sess|}"
+            if [[ "${CONVS[$key]}" == "$arg" ]]; then echo "$conv"; return 0; fi
+        fi
+    done
+    return 1
+}
+
+count_convs_in_session() {
+    local sess="$1" count=0
+    for key in "${!CONVS[@]}"; do
+        [[ "$key" == "${sess}|"* ]] && ((count++))
+    done
+    echo "$count"
+}
+
+count_msgs_in_conv() {
+    local key="$1|$2"
+    printf '%s' "${MSGS[$key]:-[]}" | jq 'length'
+}
+
+# Sync in-memory CONVERSATION array to MSGS for current pointers
+br_sync_msgs() {
+    [[ -z "$CUR_SESSION_NAME" || -z "$CUR_CONV_NAME" ]] && return 0
+    local key="${CUR_SESSION_NAME}|${CUR_CONV_NAME}"
+    if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
+        MSGS[$key]=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
+    else
+        MSGS[$key]="[]"
+    fi
+}
+
+# Load MSGS for current pointers into CONVERSATION array
+br_load_msgs() {
+    CONVERSATION=()
+    [[ -z "$CUR_SESSION_NAME" || -z "$CUR_CONV_NAME" ]] && return 0
+    local key="${CUR_SESSION_NAME}|${CUR_CONV_NAME}"
+    local msgs_json="${MSGS[$key]:-[]}"
+    local count
+    count=$(printf '%s' "$msgs_json" | jq 'length')
+    for ((i=0; i<count; i++)); do
+        CONVERSATION+=("$(printf '%s' "$msgs_json" | jq -c ".[$i]")")
+    done
+}
+
+# Update SESSION_AFFINITY/CONVERSATION_ID from current pointers
+br_update_headers() {
+    if [[ -n "$CUR_SESSION_NAME" ]] && [[ -n "${SESSIONS[$CUR_SESSION_NAME]+x}" ]]; then
+        SESSION_AFFINITY="${SESSIONS[$CUR_SESSION_NAME]}"
+    else
+        SESSION_AFFINITY=""
+    fi
+    if [[ -n "$CUR_CONV_NAME" ]] && [[ -n "${CONVS["$CUR_SESSION_NAME|$CUR_CONV_NAME"]+x}" ]]; then
+        CONVERSATION_ID="${CONVS[${CUR_SESSION_NAME}|${CUR_CONV_NAME}]}"
+    else
+        CONVERSATION_ID=""
+    fi
+}
+
+# /info
+br_info() {
+    print_config_and_headers
+    echo "Session:"
+    if [[ -n "$CUR_SESSION_NAME" ]] && [[ -n "${SESSIONS[$CUR_SESSION_NAME]+x}" ]]; then
+        echo "  Name: $CUR_SESSION_NAME"
+        echo "  ID  : ${SESSIONS[$CUR_SESSION_NAME]}"
+        echo "  Convs: $(count_convs_in_session "$CUR_SESSION_NAME")"
+    else
+        echo "  (no current session)"
+    fi
+    echo "Conversation:"
+    if [[ -n "$CUR_CONV_NAME" ]] && [[ -n "${CONVS["$CUR_SESSION_NAME|$CUR_CONV_NAME"]+x}" ]]; then
+        echo "  Name: $CUR_CONV_NAME"
+        echo "  ID  : ${CONVS[${CUR_SESSION_NAME}|${CUR_CONV_NAME}]}"
+        echo "  Msgs: $(count_msgs_in_conv "$CUR_SESSION_NAME" "$CUR_CONV_NAME")"
+    else
+        echo "  (no current conversation)"
+    fi
+    printf "%s[INFO] Type /help to see all commands and examples. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+}
+
+# Session commands
+
+br_session_ls() {
+    if [[ ${#SESSIONS[@]} -eq 0 ]]; then
+        printf "%s[INFO] No sessions. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        return 0
+    fi
+    printf "%s%-40s %-40s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "CONVS" "${COLOR_RESET}"
+    for name in "${!SESSIONS[@]}"; do
+        local marker=" "
+        [[ "$name" == "$CUR_SESSION_NAME" ]] && marker="*"
+        printf "%s %-39s %-40s %-6s\n" "$marker" "$name" "${SESSIONS[$name]}" "$(count_convs_in_session "$name")"
+    done
+}
+
+br_session_new() {
+    local name id
+    id=$(gen_uuid)
+    name="${1:-${id: -12}}" # default to last 12 chars of UUID
+    if ! is_valid_name "$name"; then
+        printf "%s[ERROR] Invalid session name (no spaces or '|'). [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
         return 1
     fi
+    if [[ -n "${SESSIONS[$name]+x}" ]]; then
+        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+        return 1
+    fi
+    br_sync_msgs
+    SESSIONS[$name]="$id"
+    CUR_SESSION_NAME="$name"
+    CUR_CONV_NAME=""
+    CONVERSATION=()
+    br_update_headers
+    printf "%s[INFO] Created and switched to session '%s' (id: %s). No current conversation. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$id" "${COLOR_RESET}"
+}
+
+br_session_clear() {
+    local sess
+    if [[ -z "$1" ]]; then
+        sess="$CUR_SESSION_NAME"
+    else
+        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    fi
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    local -a to_remove=()
+    for key in "${!CONVS[@]}"; do
+        [[ "$key" == "${sess}|"* ]] && to_remove+=("$key")
+    done
+    for key in "${to_remove[@]}"; do
+        unset "CONVS[$key]"
+        unset "MSGS[$key]"
+    done
+    if [[ "$sess" == "$CUR_SESSION_NAME" ]]; then
+        CUR_CONV_NAME=""
+        CONVERSATION=()
+        br_update_headers
+        printf "%s[INFO] Cleared all conversations in current session '%s'. No current conversation. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "${COLOR_RESET}"
+    else
+        printf "%s[INFO] Cleared all conversations in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "${COLOR_RESET}"
+    fi
+}
+
+br_session_mv() {
+    local old new
+    if [[ $# -eq 1 ]]; then
+        [[ -z "$CUR_SESSION_NAME" ]] && { printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1; }
+        old="$CUR_SESSION_NAME"; new="$1"
+    elif [[ $# -eq 2 ]]; then
+        old=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        new="$2"
+    else
+        printf "%s[ERROR] Usage: /session mv <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -n "${SESSIONS[$new]+x}" ]]; then
+        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"; return 1
+    fi
+    if ! is_valid_name "$new"; then
+        printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    SESSIONS[$new]="${SESSIONS[$old]}"
+    unset "SESSIONS[$old]"
+    # Move conv entries
+    local -a keys_to_move=()
+    for key in "${!CONVS[@]}"; do
+        [[ "$key" == "${old}|"* ]] && keys_to_move+=("$key")
+    done
+    for key in "${keys_to_move[@]}"; do
+        local conv="${key#${old}|}"
+        local new_key="${new}|${conv}"
+        CONVS[$new_key]="${CONVS[$key]}"
+        MSGS[$new_key]="${MSGS[$key]}"
+        unset "CONVS[$key]"
+        unset "MSGS[$key]"
+    done
+    if [[ "$old" == "$CUR_SESSION_NAME" ]]; then
+        CUR_SESSION_NAME="$new"
+    fi
+    br_update_headers
+    printf "%s[INFO] Renamed session '%s' -> '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$old" "$new" "${COLOR_RESET}"
+}
+
+br_session_cp() {
+    local old new
+    if [[ $# -eq 1 ]]; then
+        [[ -z "$CUR_SESSION_NAME" ]] && { printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1; }
+        old="$CUR_SESSION_NAME"; new="$1"
+    elif [[ $# -eq 2 ]]; then
+        old=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        new="$2"
+    else
+        printf "%s[ERROR] Usage: /session cp <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -n "${SESSIONS[$new]+x}" ]]; then
+        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"; return 1
+    fi
+    if ! is_valid_name "$new"; then
+        printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    local new_id=$(gen_uuid)
+    SESSIONS[$new]="$new_id"
+    for key in "${!CONVS[@]}"; do
+        if [[ "$key" == "${old}|"* ]]; then
+            local conv="${key#${old}|}"
+            local new_key="${new}|${conv}"
+            local new_conv_id=$(gen_uuid)
+            CONVS[$new_key]="$new_conv_id"
+            MSGS[$new_key]="${MSGS[$key]}"
+        fi
+    done
+    br_update_headers
+    printf "%s[INFO] Copied session '%s' -> '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$old" "$new" "${COLOR_RESET}"
+}
+
+br_session_rm() {
+    local name
+    if [[ -z "$1" ]]; then
+        name="$CUR_SESSION_NAME"
+    else
+        name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    fi
+    if [[ -z "$name" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    unset "SESSIONS[$name]"
+    local -a to_remove=()
+    for key in "${!CONVS[@]}"; do
+        [[ "$key" == "${name}|"* ]] && to_remove+=("$key")
+    done
+    for key in "${to_remove[@]}"; do
+        unset "CONVS[$key]"
+        unset "MSGS[$key]"
+    done
+    if [[ "$name" == "$CUR_SESSION_NAME" ]]; then
+        CUR_SESSION_NAME=""
+        CUR_CONV_NAME=""
+        CONVERSATION=()
+        br_update_headers
+        printf "%s[INFO] Removed current session '%s'. No current session/conversation. Use /session resume or /session new. [/INFO]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+    else
+        br_update_headers
+        printf "%s[INFO] Removed session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+    fi
+}
+
+# Serialize single session to JSON
+br_dump_session_json() {
+    local name="$1"
+    local id="${SESSIONS[$name]}"
+    local convs_json="[]"
+    for key in "${!CONVS[@]}"; do
+        if [[ "$key" == "${name}|"* ]]; then
+            local conv="${key#${name}|}"
+            local conv_obj
+            conv_obj=$(jq -n \
+                --arg name "$conv" \
+                --arg id "${CONVS[$key]}" \
+                --argjson msgs "${MSGS[$key]:-[]}" \
+                '{name: $name, id: $id, messages: $msgs}')
+            convs_json=$(printf '%s\n%s' "$convs_json" "$conv_obj" | jq -s '.')
+        fi
+    done
+    jq -n --arg name "$name" --arg id "$id" --argjson convs "$convs_json" \
+        '{name: $name, id: $id, conversations: $convs}'
+}
+
+br_session_dump() {
+    local name
+    if [[ -z "$1" ]]; then
+        name="$CUR_SESSION_NAME"
+    else
+        name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    fi
+    if [[ -z "$name" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    br_dump_session_json "$name" | jq $JQ_COLOR_FLAG .
+}
+
+br_session_resume() {
+    local name
+    if [[ -z "$1" ]]; then
+        printf "%s[ERROR] Usage: /session resume <id-or-name>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    br_sync_msgs
+    CUR_SESSION_NAME="$name"
+    CUR_CONV_NAME=""
+    CONVERSATION=()
+    br_update_headers
+    printf "%s[INFO] Resumed session '%s'. No current conversation set. [/INFO]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+}
+
+br_session_save() {
+    if [[ $# -eq 1 ]]; then
+        local file="$1"
+        local sessions_json="[]"
+        for sname in "${!SESSIONS[@]}"; do
+            local sjson=$(br_dump_session_json "$sname")
+            sessions_json=$(printf '%s\n%s' "$sessions_json" "$sjson" | jq -s '.')
+        done
+        jq -n --argjson sessions "$sessions_json" '{sessions: $sessions}' > "$file"
+        printf "%s[INFO] Saved %d session(s) to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "${#SESSIONS[@]}" "$file" "${COLOR_RESET}"
+    elif [[ $# -eq 2 ]]; then
+        local name file
+        name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        file="$2"
+        br_sync_msgs
+        br_dump_session_json "$name" | jq . > "$file"
+        printf "%s[INFO] Saved session '%s' to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$file" "${COLOR_RESET}"
+    else
+        printf "%s[ERROR] Usage: /session save <file> | <id-or-name> <file>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+}
+
+br_session_load() {
+    if [[ $# -eq 1 ]]; then
+        local file="$1"
+        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        br_sync_msgs
+        local data=$(cat "$file")
+        local count=0
+        local n=$(printf '%s' "$data" | jq '.sessions | length')
+        for ((i=0; i<n; i++)); do
+            local sname=$(printf '%s' "$data" | jq -r ".sessions[$i].name")
+            local sid=$(printf '%s' "$data" | jq -r ".sessions[$i].id")
+            SESSIONS[$sname]="$sid"
+            local cn=$(printf '%s' "$data" | jq ".sessions[$i].conversations | length")
+            for ((j=0; j<cn; j++)); do
+                local cname=$(printf '%s' "$data" | jq -r ".sessions[$i].conversations[$j].name")
+                local cid=$(printf '%s' "$data" | jq -r ".sessions[$i].conversations[$j].id")
+                local cmsgs=$(printf '%s' "$data" | jq -c ".sessions[$i].conversations[$j].messages")
+                local key="${sname}|${cname}"
+                CONVS[$key]="$cid"
+                MSGS[$key]="$cmsgs"
+            done
+            ((count++))
+        done
+        br_sync_msgs; br_load_msgs; br_update_headers
+        printf "%s[INFO] Loaded %d session(s) from '%s'. Same-name sessions replaced. [/INFO]%s\n" "${COLOR_DIM}" "$count" "$file" "${COLOR_RESET}"
+    elif [[ $# -eq 2 ]]; then
+        local file="$1" name="$2"
+        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        if ! is_valid_name "$name"; then
+            printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        fi
+        br_sync_msgs
+        local data=$(cat "$file")
+        local sjson
+        if [[ "$(printf '%s' "$data" | jq -r 'has("sessions")')" == "true" ]]; then
+            sjson=$(printf '%s' "$data" | jq -c '.sessions[0]')
+        else
+            sjson=$(printf '%s' "$data" | jq -c '.')
+        fi
+        SESSIONS[$name]=$(printf '%s' "$sjson" | jq -r '.id')
+        # Remove existing convs for this session
+        local -a to_remove=()
+        for key in "${!CONVS[@]}"; do
+            [[ "$key" == "${name}|"* ]] && to_remove+=("$key")
+        done
+        for key in "${to_remove[@]}"; do
+            unset "CONVS[$key]"; unset "MSGS[$key]"
+        done
+        local cn=$(printf '%s' "$sjson" | jq '.conversations | length')
+        for ((j=0; j<cn; j++)); do
+            local cname=$(printf '%s' "$sjson" | jq -r ".conversations[$j].name")
+            local cid=$(printf '%s' "$sjson" | jq -r ".conversations[$j].id")
+            local cmsgs=$(printf '%s' "$sjson" | jq -c ".conversations[$j].messages")
+            local key="${name}|${cname}"
+            CONVS[$key]="$cid"; MSGS[$key]="$cmsgs"
+        done
+        br_sync_msgs; br_load_msgs; br_update_headers
+        printf "%s[INFO] Loaded session into '%s' from '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$file" "${COLOR_RESET}"
+    else
+        printf "%s[ERROR] Usage: /session load <file> | <file> <name>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+}
+
+# Conversation commands
+
+br_conv_ls() {
+    local sess
+    if [[ -z "$1" ]]; then
+        sess="$CUR_SESSION_NAME"
+    else
+        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    fi
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    local -a convs_in_sess=()
+    for key in "${!CONVS[@]}"; do
+        [[ "$key" == "${sess}|"* ]] && convs_in_sess+=("${key#${sess}|}")
+    done
+    if [[ ${#convs_in_sess[@]} -eq 0 ]]; then
+        printf "%s[INFO] No conversations in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "${COLOR_RESET}"
+        return 0
+    fi
+    printf "%s%-40s %-40s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "MSGS" "${COLOR_RESET}"
+    for conv in "${convs_in_sess[@]}"; do
+        local marker=" "
+        [[ "$sess" == "$CUR_SESSION_NAME" && "$conv" == "$CUR_CONV_NAME" ]] && marker="*"
+        printf "%s %-39s %-40s %-6s\n" "$marker" "$conv" "${CONVS[${sess}|${conv}]}" "$(count_msgs_in_conv "$sess" "$conv")"
+    done
+}
+
+br_conv_new() {
+    local sess name id
+    if [[ $# -eq 0 ]]; then
+        sess="$CUR_SESSION_NAME"; id=$(gen_uuid); name="${id: -12}"
+    elif [[ $# -eq 1 ]]; then
+        sess="$CUR_SESSION_NAME"; name="$1"; id=$(gen_uuid)
+    elif [[ $# -eq 2 ]]; then
+        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name="$2"; id=$(gen_uuid)
+    else
+        printf "%s[ERROR] Usage: /session conv new [sess] [conv]. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No current session. Specify session or set one. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if ! is_valid_name "$name"; then
+        printf "%s[ERROR] Invalid conv name (no spaces or '|'). [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -n "${CONVS["$sess|$name"]+x}" ]]; then
+        printf "%s[ERROR] Conversation '%s' already exists in session '%s'. [/ERROR]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    local key="${sess}|${name}"
+    CONVS[$key]="$id"
+    MSGS[$key]="[]"
+    CUR_SESSION_NAME="$sess"
+    CUR_CONV_NAME="$name"
+    CONVERSATION=()
+    br_update_headers
+    printf "%s[INFO] Created and switched to conversation '%s' (id: %s) in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$id" "$sess" "${COLOR_RESET}"
+}
+
+br_conv_rm() {
+    local sess name
+    if [[ $# -eq 0 ]]; then
+        sess="$CUR_SESSION_NAME"; name="$CUR_CONV_NAME"
+    elif [[ $# -eq 1 ]]; then
+        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    elif [[ $# -eq 2 ]]; then
+        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name=$(get_conv_name "$sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+    else
+        printf "%s[ERROR] Usage: /session conv rm [sess] [conv]. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No session specified. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$name" ]]; then
+        printf "%s[ERROR] No conversation specified. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    local key="${sess}|${name}"
+    unset "CONVS[$key]"; unset "MSGS[$key]"
+    if [[ "$sess" == "$CUR_SESSION_NAME" && "$name" == "$CUR_CONV_NAME" ]]; then
+        CUR_CONV_NAME=""
+        CONVERSATION=()
+        br_update_headers
+        printf "%s[INFO] Removed current conversation '%s' from session '%s'. No current conversation. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"
+    else
+        printf "%s[INFO] Removed conversation '%s' from session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"
+    fi
+}
+
+br_conv_mv() {
+    local src_sess src_conv dst_sess dst_conv
+    if [[ $# -eq 1 ]]; then
+        src_sess="$CUR_SESSION_NAME"; src_conv="$CUR_CONV_NAME"
+        dst_sess="$CUR_SESSION_NAME"; dst_conv="$1"
+    elif [[ $# -eq 2 ]]; then
+        src_sess="$CUR_SESSION_NAME"; src_conv=$(get_conv_name "$src_sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        dst_sess="$CUR_SESSION_NAME"; dst_conv="$2"
+    elif [[ $# -eq 4 ]]; then
+        src_sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        src_conv=$(get_conv_name "$src_sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+        dst_sess=$(get_sess_name "$3") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$3" "${COLOR_RESET}"; return 1; }
+        dst_conv="$4"
+    else
+        printf "%s[ERROR] Usage: /session conv mv <new> | <old> <new> | <s1> <c1> <s2> <c2>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$src_sess" || -z "$src_conv" ]]; then
+        printf "%s[ERROR] No current conversation. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -n "${CONVS["$dst_sess|$dst_conv"]+x}" ]]; then
+        printf "%s[ERROR] Conversation '%s' already exists in '%s'. [/ERROR]%s\n" "${COLOR_DIM}" "$dst_conv" "$dst_sess" "${COLOR_RESET}"; return 1
+    fi
+    if ! is_valid_name "$dst_conv"; then
+        printf "%s[ERROR] Invalid conv name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    local src_key="${src_sess}|${src_conv}"
+    local dst_key="${dst_sess}|${dst_conv}"
+    CONVS[$dst_key]="${CONVS[$src_key]}"
+    MSGS[$dst_key]="${MSGS[$src_key]}"
+    unset "CONVS[$src_key]"; unset "MSGS[$src_key]"
+    if [[ "$src_sess" == "$CUR_SESSION_NAME" && "$src_conv" == "$CUR_CONV_NAME" ]]; then
+        CUR_SESSION_NAME="$dst_sess"; CUR_CONV_NAME="$dst_conv"
+        br_load_msgs
+    fi
+    br_update_headers
+    printf "%s[INFO] Moved conversation '%s' (session '%s') -> '%s' (session '%s'). [/INFO]%s\n" "${COLOR_DIM}" "$src_conv" "$src_sess" "$dst_conv" "$dst_sess" "${COLOR_RESET}"
+}
+
+br_conv_cp() {
+    local src_sess src_conv dst_sess dst_conv
+    if [[ $# -eq 1 ]]; then
+        src_sess="$CUR_SESSION_NAME"; src_conv="$CUR_CONV_NAME"
+        dst_sess="$CUR_SESSION_NAME"; dst_conv="$1"
+    elif [[ $# -eq 2 ]]; then
+        src_sess="$CUR_SESSION_NAME"; src_conv=$(get_conv_name "$src_sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        dst_sess="$CUR_SESSION_NAME"; dst_conv="$2"
+    elif [[ $# -eq 4 ]]; then
+        src_sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        src_conv=$(get_conv_name "$src_sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+        dst_sess=$(get_sess_name "$3") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$3" "${COLOR_RESET}"; return 1; }
+        dst_conv="$4"
+    else
+        printf "%s[ERROR] Usage: /session conv cp <new> | <old> <new> | <s1> <c1> <s2> <c2>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$src_sess" || -z "$src_conv" ]]; then
+        printf "%s[ERROR] No current conversation. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -n "${CONVS["$dst_sess|$dst_conv"]+x}" ]]; then
+        printf "%s[ERROR] Conversation '%s' already exists in '%s'. [/ERROR]%s\n" "${COLOR_DIM}" "$dst_conv" "$dst_sess" "${COLOR_RESET}"; return 1
+    fi
+    if ! is_valid_name "$dst_conv"; then
+        printf "%s[ERROR] Invalid conv name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    local src_key="${src_sess}|${src_conv}"
+    local dst_key="${dst_sess}|${dst_conv}"
+    CONVS[$dst_key]=$(gen_uuid)
+    MSGS[$dst_key]="${MSGS[$src_key]}"
+    br_update_headers
+    printf "%s[INFO] Copied conversation '%s' (session '%s') -> '%s' (session '%s'). [/INFO]%s\n" "${COLOR_DIM}" "$src_conv" "$src_sess" "$dst_conv" "$dst_sess" "${COLOR_RESET}"
+}
+
+br_conv_resume() {
+    local sess name
+    if [[ $# -eq 1 ]]; then
+        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    elif [[ $# -eq 2 ]]; then
+        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name=$(get_conv_name "$sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+    else
+        printf "%s[ERROR] Usage: /session conv resume <conv> | <sess> <conv>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    br_sync_msgs
+    CUR_SESSION_NAME="$sess"; CUR_CONV_NAME="$name"
+    br_load_msgs
+    br_update_headers
+    printf "%s[INFO] Resumed conversation '%s' in session '%s' (%d messages). [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "$(count_msgs_in_conv "$sess" "$name")" "${COLOR_RESET}"
+}
+
+br_conv_clear() {
+    local sess name
+    if [[ $# -eq 0 ]]; then
+        sess="$CUR_SESSION_NAME"; name="$CUR_CONV_NAME"
+    elif [[ $# -eq 1 ]]; then
+        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    elif [[ $# -eq 2 ]]; then
+        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name=$(get_conv_name "$sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+    else
+        printf "%s[ERROR] Usage: /session conv clear [sess] [conv]. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ -z "$name" ]]; then
+        printf "%s[ERROR] No current conversation. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    MSGS["${sess}|${name}"]="[]"
+    if [[ "$sess" == "$CUR_SESSION_NAME" && "$name" == "$CUR_CONV_NAME" ]]; then
+        CONVERSATION=()
+    fi
+    printf "%s[INFO] Cleared messages of conversation '%s' in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"
+}
+
+br_conv_save() {
+    local sess="$CUR_SESSION_NAME"
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ $# -eq 1 ]]; then
+        local file="$1"
+        br_sync_msgs
+        br_dump_session_json "$sess" | jq . > "$file"
+        printf "%s[INFO] Saved all conversations of session '%s' to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "$file" "${COLOR_RESET}"
+    elif [[ $# -eq 2 ]]; then
+        local name file="$2"
+        name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        br_sync_msgs
+        local key="${sess}|${name}"
+        jq -n --arg name "$name" --arg id "${CONVS[$key]}" --argjson msgs "${MSGS[$key]:-[]}" \
+            '{name: $name, id: $id, messages: $msgs}' | jq . > "$file"
+        printf "%s[INFO] Saved conversation '%s' (session '%s') to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "$file" "${COLOR_RESET}"
+    else
+        printf "%s[ERROR] Usage: /session conv save <file> | <conv> <file>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+}
+
+br_conv_load() {
+    local sess="$CUR_SESSION_NAME"
+    if [[ -z "$sess" ]]; then
+        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+    if [[ $# -eq 1 ]]; then
+        local file="$1"
+        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        br_sync_msgs
+        local data=$(cat "$file")
+        local count=0
+        if [[ "$(printf '%s' "$data" | jq -r 'has("conversations")')" == "true" ]]; then
+            local n=$(printf '%s' "$data" | jq '.conversations | length')
+            for ((j=0; j<n; j++)); do
+                local cname=$(printf '%s' "$data" | jq -r ".conversations[$j].name")
+                local cid=$(printf '%s' "$data" | jq -r ".conversations[$j].id")
+                local cmsgs=$(printf '%s' "$data" | jq -c ".conversations[$j].messages")
+                CONVS["${sess}|${cname}"]="$cid"
+                MSGS["${sess}|${cname}"]="$cmsgs"
+                ((count++))
+            done
+        elif [[ "$(printf '%s' "$data" | jq -r 'has("messages")')" == "true" ]]; then
+            local cname=$(printf '%s' "$data" | jq -r '.name')
+            CONVS["${sess}|${cname}"]=$(printf '%s' "$data" | jq -r '.id')
+            MSGS["${sess}|${cname}"]=$(printf '%s' "$data" | jq -c '.messages')
+            count=1
+        else
+            printf "%s[ERROR] Unrecognized file format. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        fi
+        br_sync_msgs; br_load_msgs; br_update_headers
+        printf "%s[INFO] Loaded %d conversation(s) into session '%s' from '%s'. Same-name convs replaced. [/INFO]%s\n" "${COLOR_DIM}" "$count" "$sess" "$file" "${COLOR_RESET}"
+    elif [[ $# -eq 2 ]]; then
+        local file="$1" name="$2"
+        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        if ! is_valid_name "$name"; then
+            printf "%s[ERROR] Invalid conv name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        fi
+        local data=$(cat "$file")
+        local cid cmsgs
+        if [[ "$(printf '%s' "$data" | jq -r 'has("messages")')" == "true" ]]; then
+            cid=$(printf '%s' "$data" | jq -r '.id')
+            cmsgs=$(printf '%s' "$data" | jq -c '.messages')
+        else
+            local n=$(printf '%s' "$data" | jq '.conversations | length')
+            if [[ "$n" -ge 1 ]]; then
+                cid=$(printf '%s' "$data" | jq -r ".conversations[0].id")
+                cmsgs=$(printf '%s' "$data" | jq -c ".conversations[0].messages")
+            else
+                printf "%s[ERROR] No conversations in file. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+            fi
+        fi
+        CONVS["${sess}|${name}"]="$cid"
+        MSGS["${sess}|${name}"]="$cmsgs"
+        br_sync_msgs; br_load_msgs; br_update_headers
+        printf "%s[INFO] Loaded conversation into '%s' (session '%s') from '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "$file" "${COLOR_RESET}"
+    else
+        printf "%s[ERROR] Usage: /session conv load <file> | <file> <conv>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+    fi
+}
+
+# Dispatchers
+
+br_handle_session_conv() {
+    local sub="$1"; shift || true
+    case "$sub" in
+        ls)     br_conv_ls "$@" ;;
+        new)    br_conv_new "$@" ;;
+        rm)     br_conv_rm "$@" ;;
+        mv)     br_conv_mv "$@" ;;
+        cp)     br_conv_cp "$@" ;;
+        resume) br_conv_resume "$@" ;;
+        save)   br_conv_save "$@" ;;
+        load)   br_conv_load "$@" ;;
+        clear)  br_conv_clear "$@" ;;
+        "")     printf "%s[INFO] Usage: /session conv <ls|new|rm|mv|cp|resume|save|load|clear> ... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}" ;;
+        *)      printf "%s[ERROR] Unknown /session conv sub-command: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$sub" "${COLOR_RESET}" ;;
+    esac
+}
+
+br_handle_session() {
+    local sub="$1"; shift || true
+    case "$sub" in
+        ls)     br_session_ls "$@" ;;
+        new)    br_session_new "$@" ;;
+        clear)  br_session_clear "$@" ;;
+        mv)     br_session_mv "$@" ;;
+        cp)     br_session_cp "$@" ;;
+        rm)     br_session_rm "$@" ;;
+        dump)   br_session_dump "$@" ;;
+        resume) br_session_resume "$@" ;;
+        save)   br_session_save "$@" ;;
+        load)   br_session_load "$@" ;;
+        conv)   br_handle_session_conv "$@" ;;
+        "")     printf "%s[INFO] Usage: /session <ls|new|clear|mv|cp|rm|dump|resume|save|load|conv> ... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}" ;;
+        *)      printf "%s[ERROR] Unknown /session sub-command: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$sub" "${COLOR_RESET}" ;;
+    esac
+}
+
+# /conv is an independent command limited to current session
+br_handle_conv() {
+    local sub="$1"; shift || true
+    case "$sub" in
+        ls)     br_conv_ls "$CUR_SESSION_NAME" ;;
+        new)    br_conv_new "$@" ;;
+        rm)
+            if [[ $# -eq 0 ]]; then br_conv_rm
+            else br_conv_rm "$CUR_SESSION_NAME" "$1"; fi ;;
+        mv)
+            if [[ $# -eq 1 || $# -eq 2 ]]; then br_conv_mv "$@"
+            else printf "%s[ERROR] Usage: /conv mv <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; fi ;;
+        cp)
+            if [[ $# -eq 1 || $# -eq 2 ]]; then br_conv_cp "$@"
+            else printf "%s[ERROR] Usage: /conv cp <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; fi ;;
+        resume)
+            if [[ $# -eq 1 ]]; then br_conv_resume "$CUR_SESSION_NAME" "$1"
+            else printf "%s[ERROR] Usage: /conv resume <name>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; fi ;;
+        save)   br_conv_save "$@" ;;
+        load)   br_conv_load "$@" ;;
+        clear)
+            if [[ $# -eq 0 ]]; then br_conv_clear
+            else br_conv_clear "$CUR_SESSION_NAME" "$1"; fi ;;
+        "")     printf "%s[INFO] Usage: /conv <ls|new|rm|mv|cp|resume|save|load|clear> ... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}" ;;
+        *)      printf "%s[ERROR] Unknown /conv sub-command: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$sub" "${COLOR_RESET}" ;;
+    esac
+}
+
+# Tool implementations (unchanged)
+
+read_file() {
+    local args_json="$1"
+    local path start_line end_line append_loc
+    path=$(printf '%s' "$args_json" | jq -r '.path // empty')
+    if [[ -z "$path" ]]; then echo "Error: 'path' is required for read_file"; return 1; fi
     start_line=$(printf '%s' "$args_json" | jq -r '.start_line // 1')
     end_line=$(printf '%s' "$args_json" | jq -r '.end_line // empty')
     append_loc=$(printf '%s' "$args_json" | jq -r '.append_loc // false')
-
-    if [[ ! -f "$path" ]]; then
-        echo "Error: File not found: $path"
-        return 1
-    fi
-
+    if [[ ! -f "$path" ]]; then echo "Error: File not found: $path"; return 1; fi
     local total_lines
     total_lines=$(wc -l < "$path")
     if [[ -s "$path" ]] && [[ "$(tail -c 1 "$path" | wc -l)" -eq 0 ]]; then
         total_lines=$((total_lines + 1))
     fi
-
-    if [[ -z "$end_line" ]] || [[ "$end_line" -gt "$total_lines" ]]; then
-        end_line=$total_lines
-    fi
-
-    if [[ "$start_line" -lt 1 ]]; then
-        start_line=1
-    fi
-
-    if [[ "$start_line" -gt "$end_line" ]]; then
-        echo ""
-        return 0
-    fi
-
+    if [[ -z "$end_line" ]] || [[ "$end_line" -gt "$total_lines" ]]; then end_line=$total_lines; fi
+    if [[ "$start_line" -lt 1 ]]; then start_line=1; fi
+    if [[ "$start_line" -gt "$end_line" ]]; then echo ""; return 0; fi
     local content
     content=$(sed -n "${start_line},${end_line}p" "$path")
-
     if [[ "$append_loc" == "true" ]]; then
         local i=$start_line
         if [[ -n "$content" ]]; then
-            while IFS= read -r line; do
-                echo "${i}→ ${line}"
-                ((i++))
-            done <<< "$content"
+            while IFS= read -r line; do echo "${i}-> ${line}"; ((i++)); done <<< "$content"
         fi
     else
         echo "$content"
@@ -384,176 +1117,108 @@ read_file() {
 
 write_file() {
     local args_json="$1"
-
     local path content
     path=$(printf '%s' "$args_json" | jq -r '.path // empty')
-    if [[ -z "$path" ]]; then
-        echo "Error: 'path' is required for write_file"
-        return 1
-    fi
+    if [[ -z "$path" ]]; then echo "Error: 'path' is required for write_file"; return 1; fi
     content=$(printf '%s' "$args_json" | jq -r '.content // empty')
-
     local dir
     dir=$(dirname "$path")
-    if [[ ! -d "$dir" ]]; then
-        mkdir -p "$dir" || { echo "Error: Failed to create directory $dir"; return 1; }
-    fi
-
+    if [[ ! -d "$dir" ]]; then mkdir -p "$dir" || { echo "Error: Failed to create directory $dir"; return 1; }; fi
     printf "%s" "$content" > "$path" || { echo "Error: Failed to write to $path"; return 1; }
     echo "Successfully wrote to $path"
 }
 
 edit_file() {
     local args_json="$1"
-
     local path changes
     path=$(printf '%s' "$args_json" | jq -r '.path // empty')
-    if [[ -z "$path" ]]; then
-        echo "Error: 'path' is required for edit_file"
-        return 1
-    fi
+    if [[ -z "$path" ]]; then echo "Error: 'path' is required for edit_file"; return 1; fi
     changes=$(printf '%s' "$args_json" | jq -c '.changes // empty')
-
-    if [[ -z "$changes" || "$changes" == "null" ]]; then
-        echo "Error: 'changes' is required for edit_file"
-        return 1
-    fi
-
-    if [[ ! -f "$path" ]]; then
-        echo "Error: File not found: $path"
-        return 1
-    fi
-
+    if [[ -z "$changes" || "$changes" == "null" ]]; then echo "Error: 'changes' is required for edit_file"; return 1; fi
+    if [[ ! -f "$path" ]]; then echo "Error: File not found: $path"; return 1; fi
     mapfile -t lines < "$path"
-
     local num_changes
     num_changes=$(printf '%s' "$changes" | jq 'length')
-
-    # Sort changes by line_start descending to apply from bottom to top
     local sorted_changes
     sorted_changes=$(printf '%s' "$changes" | jq -c 'sort_by(-.line_start)')
-
     for ((c=0; c<num_changes; c++)); do
         local mode line_start line_end content
         mode=$(printf '%s' "$sorted_changes" | jq -r ".[$c].mode")
         line_start=$(printf '%s' "$sorted_changes" | jq -r ".[$c].line_start")
         line_end=$(printf '%s' "$sorted_changes" | jq -r ".[$c].line_end")
         content=$(printf '%s' "$sorted_changes" | jq -r ".[$c].content")
-
         if [[ "$line_start" -eq -1 ]]; then
             if [[ "$mode" == "append" ]]; then
-                local -a new_lines
-                mapfile -t new_lines <<< "$content"
-                lines+=("${new_lines[@]}")
+                local -a new_lines; mapfile -t new_lines <<< "$content"; lines+=("${new_lines[@]}")
             fi
             continue
         fi
-
-        local idx_start=$((line_start - 1))
-        local idx_end=$((line_end - 1))
-        local total_lines=${#lines[@]}
-
+        local idx_start=$((line_start - 1)) idx_end=$((line_end - 1)) total_lines=${#lines[@]}
         if [[ "$idx_start" -lt 0 ]]; then idx_start=0; fi
         if [[ "$idx_end" -ge "$total_lines" ]]; then idx_end=$((total_lines - 1)); fi
-
         case "$mode" in
             "replace")
-                local -a new_lines
-                mapfile -t new_lines <<< "$content"
+                local -a new_lines; mapfile -t new_lines <<< "$content"
                 local -a temp=("${lines[@]:0:idx_start}" "${new_lines[@]}" "${lines[@]:idx_end+1}")
-                lines=("${temp[@]}")
-                ;;
+                lines=("${temp[@]}") ;;
             "delete")
                 local -a temp=("${lines[@]:0:idx_start}" "${lines[@]:idx_end+1}")
-                lines=("${temp[@]}")
-                ;;
+                lines=("${temp[@]}") ;;
             "append")
-                local -a new_lines
-                mapfile -t new_lines <<< "$content"
+                local -a new_lines; mapfile -t new_lines <<< "$content"
                 local insert_idx=$((idx_end + 1))
                 local -a temp=("${lines[@]:0:insert_idx}" "${new_lines[@]}" "${lines[@]:insert_idx}")
-                lines=("${temp[@]}")
-                ;;
-            *)
-                echo "Error: Unknown mode $mode"
-                return 1
-                ;;
+                lines=("${temp[@]}") ;;
+            *) echo "Error: Unknown mode $mode"; return 1 ;;
         esac
     done
-
-    if [[ ${#lines[@]} -eq 0 ]]; then
-        > "$path"
-    else
-        local IFS=$'\n'
-        echo "${lines[*]}" > "$path"
-    fi
+    if [[ ${#lines[@]} -eq 0 ]]; then > "$path"; else local IFS=$'\n'; echo "${lines[*]}" > "$path"; fi
     echo "Successfully edited $path"
 }
 
 exec_shell_command() {
     local args_json="$1"
-
     local command timeout max_output_size
     command=$(printf '%s' "$args_json" | jq -r '.command // empty')
-    if [[ -z "$command" ]]; then
-        echo "Error: 'command' is required for exec_shell_command"
-        return 1
-    fi
+    if [[ -z "$command" ]]; then echo "Error: 'command' is required for exec_shell_command"; return 1; fi
     timeout=$(printf '%s' "$args_json" | jq -r '.timeout // 10')
     max_output_size=$(printf '%s' "$args_json" | jq -r '.max_output_size // 16384')
-
-    if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then
-        timeout=10
-    fi
-    if [[ "$timeout" -gt 60 ]]; then
-        timeout=60
-    fi
-
-    if ! [[ "$max_output_size" =~ ^[0-9]+$ ]]; then
-        max_output_size=16384
-    fi
-
+    if ! [[ "$timeout" =~ ^[0-9]+$ ]]; then timeout=10; fi
+    if [[ "$timeout" -gt 60 ]]; then timeout=60; fi
+    if ! [[ "$max_output_size" =~ ^[0-9]+$ ]]; then max_output_size=16384; fi
     local output
     output=$(timeout "$timeout" bash -c "$command" 2>&1)
     local exit_code=$?
-
-    if [[ $exit_code -eq 124 ]]; then
-        echo "Error: Command timed out after ${timeout} seconds."
-        return 1
-    fi
-
-    if [[ ${#output} -gt $max_output_size ]]; then
-        output="${output:0:$max_output_size}... [truncated]"
-    fi
-
+    if [[ $exit_code -eq 124 ]]; then echo "Error: Command timed out after ${timeout} seconds."; return 1; fi
+    if [[ ${#output} -gt $max_output_size ]]; then output="${output:0:$max_output_size}... [truncated]"; fi
     echo "$output"
 }
 
 agent_skills_system() {
     cat <<'EOF'
 # Agent Skills System
-Skills are self-contained packages that give you specialized capabilities. They follow progressive disclosure — only load what you need for the current task.
+Skills are self-contained packages that give you specialized capabilities. They follow progressive disclosure - only load what you need for the current task.
 
 ## Strict Rules (Must Follow)
 Always use the dedicated skill tools to interact with skills:
-- `list_skills` — list all available skills
-- `load_skill` — load a skill
-- `list_skill_files` — list all skill's files
-- `read_skill_resource` — read a file from a skill's `references/`, `scripts/`, or `assets/` directory
-- `exec_skill_script` — execute skill's script
+- `list_skills` - list all available skills
+- `load_skill` - load a skill
+- `list_skill_files` - list all skill's files
+- `read_skill_resource` - read a file from a skill's `references/`, `scripts/`, or `assets/` directory
+- `exec_skill_script` - execute skill's script
 
 ## Directory Structure
 Each skill lives in `.agents/skills/<skill_name>/` and contains:
-- `SKILL.md` — Main file with instructions (required)
-- `references/` — Documents you can read when needed using `read_skill_resource`
-- `scripts/` — Scripts you can run using `exec_skill_script`
-- `assets/` — Templates and other files — never read or run them
+- `SKILL.md` - Main file with instructions (required)
+- `references/` - Documents you can read when needed using `read_skill_resource`
+- `scripts/` - Scripts you can run using `exec_skill_script`
+- `assets/` - Templates and other files - never read or run them
 
 ## How to Work With Skills
 1. Call `list_skills` to discover skills.
 2. Call `load_skill(skill_name)` when a skill matches the task.
 3. Call `list_skill_files(skill_name)` to explore the skill's contents.
-4. Read files from `references/` using `read_skill_resource` **only** when instructed by `SKILL.md`.
+4. Read files from `references/` using `read_skill_resource` only when instructed by `SKILL.md`.
 5. Run scripts from `scripts/` using `exec_skill_script` only if `.agents/skills/<skill_name>/scripts/` exist.
 6. Do not read anything from `assets/`.
 7. Do not read anything from `scripts/`.
@@ -563,259 +1228,114 @@ EOF
 
 list_skills() {
     local skills_dir=".agents/skills"
-
-    if [[ ! -d "$skills_dir" ]]; then
-        echo "[]"
-        return 0
-    fi
-
-    # We will collect skill JSON strings and then slurp them
+    if [[ ! -d "$skills_dir" ]]; then echo "[]"; return 0; fi
     local -a skill_jsons=()
-
     while IFS= read -r -d '' skill_file; do
-        local skill_dir
+        local skill_dir skill_name
         skill_dir=$(dirname "$skill_file")
-        local skill_name
         skill_name=$(basename "$skill_dir")
-
-        # Extract YAML frontmatter (lines between first and second ---)
         local frontmatter
-        frontmatter=$(awk '
-            /^---[[:space:]]*$/ {
-                if (in_fm) exit
-                in_fm = 1
-                next
-            }
-            in_fm { print }
-        ' "$skill_file" 2>/dev/null)
-
-        # Parse name and description from frontmatter
+        frontmatter=$(awk '/^---[[:space:]]*$/ { if (in_fm) exit; in_fm = 1; next } in_fm { print }' "$skill_file" 2>/dev/null)
         local name desc
-        name=$(printf '%s' "$frontmatter" \
-               | grep '^name:' | head -1 \
-               | sed 's/^name:[[:space:]]*//' \
-               | sed "s/^['\"]//;s/['\"]$//" \
-               | tr -d '\r')
-        desc=$(printf '%s' "$frontmatter" \
-               | grep '^description:' | head -1 \
-               | sed 's/^description:[[:space:]]*//' \
-               | sed "s/^['\"]//;s/['\"]$//" \
-               | tr -d '\r')
-
-        # Use directory name if name not in frontmatter
+        name=$(printf '%s' "$frontmatter" | grep '^name:' | head -1 | sed 's/^name:[[:space:]]*//' | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')
+        desc=$(printf '%s' "$frontmatter" | grep '^description:' | head -1 | sed 's/^description:[[:space:]]*//' | sed "s/^['\"]//;s/['\"]$//" | tr -d '\r')
         [[ -z "$name" ]] && name="$skill_name"
         [[ -z "$desc" ]] && desc="(no description)"
-
-        # Add JSON object to array
-        skill_jsons+=($(jq -c -n \
-            --arg name "$name" \
-            --arg desc "$desc" \
-            --arg path "$skill_dir" \
-            '{"name": $name, "description": $desc, "skill_path": $path}'))
+        skill_jsons+=($(jq -c -n --arg name "$name" --arg desc "$desc" --arg path "$skill_dir" '{"name": $name, "description": $desc, "skill_path": $path}'))
     done < <(find "$skills_dir" -mindepth 2 -name "SKILL.md" -print0 2>/dev/null)
-
-    if [[ ${#skill_jsons[@]} -eq 0 ]]; then
-        echo "[]"
-    else
-        printf '%s\n' "${skill_jsons[@]}" | jq -s '.'
-    fi
+    if [[ ${#skill_jsons[@]} -eq 0 ]]; then echo "[]"; else printf '%s\n' "${skill_jsons[@]}" | jq -s '.'; fi
 }
 
 list_skill_files() {
     local args_json="$1"
-
     local skill_name
     skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
-
-    if [[ -z "$skill_name" ]]; then
-        echo "Error: 'skill_name' is required for list_skill_files"
-        return 1
-    fi
-
-    # Basic path traversal check
-    if [[ "$skill_name" == *..* ]]; then
-        echo "Error: Path traversal is not allowed"
-        return 1
-    fi
-
+    if [[ -z "$skill_name" ]]; then echo "Error: 'skill_name' is required for list_skill_files"; return 1; fi
+    if [[ "$skill_name" == *..* ]]; then echo "Error: Path traversal is not allowed"; return 1; fi
     local skill_dir=".agents/skills/$skill_name"
-
-    if [[ ! -d "$skill_dir" ]]; then
-        echo "Error: Skill directory not found: $skill_name (looked for $skill_dir)"
-        return 1
-    fi
-
+    if [[ ! -d "$skill_dir" ]]; then echo "Error: Skill directory not found: $skill_name (looked for $skill_dir)"; return 1; fi
     find "$skill_dir" -type f | sort
 }
 
 load_skill() {
     local args_json="$1"
-
     local skill_name
     skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
-
-    if [[ -z "$skill_name" ]]; then
-        echo "Error: 'skill_name' is required for load_skill"
-        return 1
-    fi
-
-    # Basic path traversal check
-    if [[ "$skill_name" == *..* ]]; then
-        echo "Error: Path traversal is not allowed"
-        return 1
-    fi
-
+    if [[ -z "$skill_name" ]]; then echo "Error: 'skill_name' is required for load_skill"; return 1; fi
+    if [[ "$skill_name" == *..* ]]; then echo "Error: Path traversal is not allowed"; return 1; fi
     local skill_path=".agents/skills/$skill_name/SKILL.md"
-
-    if [[ ! -f "$skill_path" ]]; then
-        echo "Error: Skill not found: $skill_name (looked for $skill_path)"
-        return 1
-    fi
-
+    if [[ ! -f "$skill_path" ]]; then echo "Error: Skill not found: $skill_name (looked for $skill_path)"; return 1; fi
     cat "$skill_path"
 }
 
 read_skill_resource() {
     local args_json="$1"
-
     local skill_name resource_path
     skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
     resource_path=$(printf '%s' "$args_json" | jq -r '.resource_path // empty')
-
-    if [[ -z "$skill_name" ]]; then
-        echo "Error: 'skill_name' is required for read_skill_resource"
-        return 1
-    fi
-
-    if [[ -z "$resource_path" ]]; then
-        echo "Error: 'resource_path' is required for read_skill_resource"
-        return 1
-    fi
-
-    # Basic path traversal check
-    if [[ "$skill_name" == *..* || "$resource_path" == *..* ]]; then
-        echo "Error: Path traversal is not allowed"
-        return 1
-    fi
-
+    if [[ -z "$skill_name" ]]; then echo "Error: 'skill_name' is required for read_skill_resource"; return 1; fi
+    if [[ -z "$resource_path" ]]; then echo "Error: 'resource_path' is required for read_skill_resource"; return 1; fi
+    if [[ "$skill_name" == *..* || "$resource_path" == *..* ]]; then echo "Error: Path traversal is not allowed"; return 1; fi
     local skill_dir=".agents/skills/$skill_name"
     local full_path="$skill_dir/$resource_path"
-
-    # Verify the path stays within the skill directory
     if [[ -d "$skill_dir" ]]; then
         local resolved_path resolved_skill_dir
         resolved_path=$(realpath -m "$full_path" 2>/dev/null)
         resolved_skill_dir=$(realpath -m "$skill_dir" 2>/dev/null)
-
         if [[ -n "$resolved_path" && -n "$resolved_skill_dir" ]]; then
             if [[ "$resolved_path" != "$resolved_skill_dir"* ]]; then
-                echo "Error: Resource path must be within the skill directory"
-                return 1
+                echo "Error: Resource path must be within the skill directory"; return 1
             fi
         fi
     fi
-
-    if [[ ! -f "$full_path" ]]; then
-        echo "Error: Resource not found: $resource_path in skill $skill_name (looked for $full_path)"
-        return 1
-    fi
-
+    if [[ ! -f "$full_path" ]]; then echo "Error: Resource not found: $resource_path in skill $skill_name (looked for $full_path)"; return 1; fi
     cat "$full_path"
 }
 
 exec_skill_script() {
     local args_json="$1"
-
     local skill_name script_name
     skill_name=$(printf '%s' "$args_json" | jq -r '.skill_name // empty')
     script_name=$(printf '%s' "$args_json" | jq -r '.script_name // empty')
-
-    if [[ -z "$skill_name" ]]; then
-        echo "Error: 'skill_name' is required for exec_skill_script"
-        return 1
-    fi
-
-    if [[ -z "$script_name" ]]; then
-        echo "Error: 'script_name' is required for exec_skill_script"
-        return 1
-    fi
-
-    # Basic path traversal check
-    if [[ "$skill_name" == *..* || "$script_name" == *..* ]]; then
-        echo "Error: Path traversal is not allowed"
-        return 1
-    fi
-
+    if [[ -z "$skill_name" ]]; then echo "Error: 'skill_name' is required for exec_skill_script"; return 1; fi
+    if [[ -z "$script_name" ]]; then echo "Error: 'script_name' is required for exec_skill_script"; return 1; fi
+    if [[ "$skill_name" == *..* || "$script_name" == *..* ]]; then echo "Error: Path traversal is not allowed"; return 1; fi
     local skill_dir=".agents/skills/$skill_name"
     local scripts_dir="$skill_dir/scripts"
     local full_path="$scripts_dir/$script_name"
-
-    # Verify the path stays within the skill's scripts directory
     if [[ -d "$scripts_dir" ]]; then
         local resolved_path resolved_scripts_dir
         resolved_path=$(realpath -m "$full_path" 2>/dev/null)
         resolved_scripts_dir=$(realpath -m "$scripts_dir" 2>/dev/null)
-
         if [[ -n "$resolved_path" && -n "$resolved_scripts_dir" ]]; then
             if [[ "$resolved_path" != "$resolved_scripts_dir"* ]]; then
-                echo "Error: Script path must be within the skill's scripts/ directory"
-                return 1
+                echo "Error: Script path must be within the skill's scripts/ directory"; return 1
             fi
         fi
     fi
-
-    if [[ ! -f "$full_path" ]]; then
-        echo "Error: Script not found: $script_name in skill $skill_name (looked for $full_path)"
-        return 1
-    fi
-
-    # Make script executable if needed
-    if [[ ! -x "$full_path" ]]; then
-        chmod +x "$full_path" 2>/dev/null
-    fi
-
-    # Build command with optional arguments
+    if [[ ! -f "$full_path" ]]; then echo "Error: Script not found: $script_name in skill $skill_name (looked for $full_path)"; return 1; fi
+    if [[ ! -x "$full_path" ]]; then chmod +x "$full_path" 2>/dev/null; fi
     local -a cmd_args=("$full_path")
     local num_args
     num_args=$(printf '%s' "$args_json" | jq '(.args // []) | length')
-
     for ((i=0; i<num_args; i++)); do
-        local arg
-        arg=$(printf '%s' "$args_json" | jq -r ".args[$i]")
-        cmd_args+=("$arg")
+        cmd_args+=("$(printf '%s' "$args_json" | jq -r ".args[$i]")")
     done
-
-    # Execute with timeout and output size limits
-    local timeout=60
-    local max_output_size=65536
-
+    local timeout=60 max_output_size=65536
     local output
     output=$(timeout "$timeout" "${cmd_args[@]}" 2>&1)
     local exit_code=$?
-
-    if [[ $exit_code -eq 124 ]]; then
-        echo "Error: Script timed out after ${timeout} seconds."
-        return 1
-    fi
-
-    if [[ ${#output} -gt $max_output_size ]]; then
-        output="${output:0:$max_output_size}... [truncated]"
-    fi
-
+    if [[ $exit_code -eq 124 ]]; then echo "Error: Script timed out after ${timeout} seconds."; return 1; fi
+    if [[ ${#output} -gt $max_output_size ]]; then output="${output:0:$max_output_size}... [truncated]"; fi
     echo "$output"
 }
 
 execute_tool() {
-    local tool_name="$1"
-    local args_json="$2"
-
-    # Validate JSON arguments before dispatching
+    local tool_name="$1" args_json="$2"
     local jq_err
     if ! jq_err=$(printf '%s' "$args_json" | jq empty 2>&1); then
-        echo "Error: Invalid JSON arguments: $jq_err"
-        return 1
+        echo "Error: Invalid JSON arguments: $jq_err"; return 1
     fi
-
     case "$tool_name" in
         "read_file")           read_file "$args_json" ;;
         "write_file")          write_file "$args_json" ;;
@@ -827,44 +1347,29 @@ execute_tool() {
         "load_skill")          load_skill "$args_json" ;;
         "read_skill_resource") read_skill_resource "$args_json" ;;
         "exec_skill_script")   exec_skill_script "$args_json" ;;
-        *)
-            echo "Error: Unknown tool $tool_name"
-            return 1
-            ;;
+        *) echo "Error: Unknown tool $tool_name"; return 1 ;;
     esac
 }
 
-# Compact the conversation history:
-# - Keep only user/assistant messages (drop tool calls/responses).
-# - Summarize them with a single non-streaming LLM request.
-# - Replace CONVERSATION with exactly two messages:
-#     1. user  -> "[Previous conversation summary]\n<summary>"
-#     2. assistant -> fake reasoning_content + content (acknowledgment).
+# Compact the conversation history
 compact_conversation() {
     if [[ ${#CONVERSATION[@]} -eq 0 ]]; then
         printf "%s[INFO] Conversation is empty, nothing to compact. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
         return 0
     fi
-
-    # Build conversation_text from only user/assistant messages.
-    local conversation_text=""
-    local found=0
+    local conversation_text="" found=0
     for msg in "${CONVERSATION[@]}"; do
         local role content
         role=$(printf '%s' "$msg" | jq -r '.role // empty')
         content=$(printf '%s' "$msg" | jq -r '.content // empty')
         if [[ "$role" == "user" || "$role" == "assistant" ]]; then
-            conversation_text+="${role}: ${content}"$'\n'
-            found=1
+            conversation_text+="${role}: ${content}"$'\n'; found=1
         fi
     done
-
     if [[ "$found" -eq 0 ]]; then
         printf "%s[INFO] No user/assistant messages to compact. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
         return 0
     fi
-
-    # Build the summarization prompt (ultra minimal, for small LLMs).
     local summary_prompt
     summary_prompt="Summarize the conversation below concisely.
 Focus on: main goal, skill names loaded and used, what was accomplished, and current status.
@@ -873,101 +1378,68 @@ Conversation:
  ${conversation_text}
 
 Summary:"
-
-    # Build messages JSON for the summarization request.
     local summary_messages_json
     summary_messages_json=$(printf '%s' "$summary_prompt" | jq -Rs '[{role: "user", content: .}]')
-
-    # Build request body (force non-streaming for simplicity).
     local request_body
-    request_body=$(jq -n \
-        --arg model "$BR_MODEL_NAME" \
-        --argjson stream "false" \
-        '{model: $model, messages: input, stream: $stream}' \
-        <<< "$summary_messages_json")
-
-    # Prepare HTTP headers (same as oai_make_request).
+    request_body=$(jq -n --arg model "$BR_MODEL_NAME" --argjson stream "false" \
+        '{model: $model, messages: input, stream: $stream}' <<< "$summary_messages_json")
     local -a curl_args=()
     curl_args+=("-H" "Content-Type: application/json")
     curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
     curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
-    if [[ -n "$BR_API_KEY" ]]; then
-        curl_args+=("-H" "Authorization: Bearer $BR_API_KEY")
-    fi
-
+    if [[ -n "$BR_API_KEY" ]]; then curl_args+=("-H" "Authorization: Bearer $BR_API_KEY"); fi
     printf "%s[COMPACTING...]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
-
     local response
     response=$(curl -s --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
-
-    if [[ -z "$response" ]]; then
-        echo "Error: Empty response from LLM server during compaction."
-        return 1
-    fi
-
+    if [[ -z "$response" ]]; then echo "Error: Empty response from LLM server during compaction."; return 1; fi
     local api_error
     api_error=$(printf '%s' "$response" | jq -r '.error.message // empty' 2>/dev/null)
-    if [[ -n "$api_error" ]]; then
-        echo "Error: $api_error"
-        return 1
-    fi
-
+    if [[ -n "$api_error" ]]; then echo "Error: $api_error"; return 1; fi
     local summary
     summary=$(printf '%s' "$response" | jq -j '.choices[0].message.content // empty' 2>/dev/null; printf x)
     summary="${summary%x}"
-
-    if [[ -z "$summary" ]]; then
-        echo "Error: Empty summary received from LLM."
-        return 1
-    fi
-
-    # Build the two replacement messages.
+    if [[ -z "$summary" ]]; then echo "Error: Empty summary received from LLM."; return 1; fi
     local summary_user_content="[SUMMARY]
  ${summary}
 [/SUMMARY]"
-
     local summary_user_msg
     summary_user_msg=$(printf '%s' "$summary_user_content" | jq -Rs '{role: "user", content: .}')
-
     local reasoning_text="The conversation history was compressed into a summary. I now understand the previous context."
     local assistant_content="Got it. Continuing from the summary."
-
     local summary_assistant_msg
     summary_assistant_msg=$(printf '%s' "$assistant_content" | jq -Rs --arg rc "$reasoning_text" '{role: "assistant", reasoning_content: $rc, content: .}')
-
-    # Replace CONVERSATION with exactly the two new messages.
     CONVERSATION=("$summary_user_msg" "$summary_assistant_msg")
-
+    br_sync_msgs
     printf "%s[COMPACTED]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
     printf "%sSummary:%s %s\n\n" "${COLOR_DIM}" "${COLOR_RESET}" "$summary"
 }
 
-# Check for standalone ESC key to interrupt generation.
-# Consumes UP/DOWN and other escape sequences so they don't interrupt or pollute input.
+# Check for standalone ESC key to interrupt generation
 check_esc_interrupt() {
-    local timeout="${1:-0.001}"
-    local key k2 k3
-    if ! IFS= read -t "$timeout" -n 1 key 2>/dev/null; then
-        return 1
-    fi
-    if [[ "$key" != $'\e' ]]; then
-        return 1
-    fi
-    # ESC pressed. Check if it's an escape sequence (like UP/DOWN arrows).
+    local timeout="${1:-0.001}" key k2 k3
+    if ! IFS= read -t "$timeout" -n 1 key 2>/dev/null; then return 1; fi
+    if [[ "$key" != $'\e' ]]; then return 1; fi
     if IFS= read -t 0.01 -n 1 k2 2>/dev/null; then
         if [[ "$k2" == "[" || "$k2" == "O" ]]; then
-            IFS= read -t 0.01 -n 1 k3 2>/dev/null # Consume 3rd char (e.g., A, B)
+            IFS= read -t 0.01 -n 1 k3 2>/dev/null
         fi
-        return 1 # It's an escape sequence, not an interrupt
+        return 1
     else
-        return 0 # Standalone ESC key, interrupt!
+        return 0
     fi
 }
 
 oai_make_request() {
     local user_message="$1"
 
-    # Append user message to conversation history safely via stdin
+    # Ensure valid session/conversation before sending
+    br_update_headers
+    if [[ -z "$SESSION_AFFINITY" || -z "$CONVERSATION_ID" ]]; then
+        echo "Error: No active session/conversation. Use /session conv new or /session conv resume."
+        return 1
+    fi
+
+    # Append user message to conversation history
     local user_msg_json
     user_msg_json=$(printf '%s' "$user_message" | jq -Rs '{role: "user", content: .}')
     CONVERSATION+=("$user_msg_json")
@@ -976,13 +1448,10 @@ oai_make_request() {
     tools_json=$(get_tools_json)
 
     while true; do
-        # Build messages array from history using jq -s to handle large histories safely
         local messages_json="[]"
         if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
             messages_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
         fi
-
-        # Construct API request body safely passing messages via stdin
         local request_body
         request_body=$(jq -n \
             --arg model "$BR_MODEL_NAME" \
@@ -991,8 +1460,7 @@ oai_make_request() {
             '{model: $model, messages: input, stream: $stream, tools: $tools}' \
             <<< "$messages_json")
 
-        # Prepare HTTP headers
-        local curl_args=()
+        local -a curl_args=()
         curl_args+=("-H" "Content-Type: application/json")
         curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
         curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
@@ -1001,245 +1469,149 @@ oai_make_request() {
         fi
 
         local request_successful=false
-
-        # Retry loop for communication failures
         while [[ "$request_successful" == "false" ]]; do
-            local reasoning_content=""
-            local reasoning_started=false
-            local response_content=""
+            local reasoning_content="" reasoning_started=false response_content=""
             local has_tool_calls=false
             local -a current_tool_calls=()
-            local api_error=""
-            local curl_exit_code=0
-            local http_code="000"
-            local err_detail=""
+            local api_error="" curl_exit_code=0 http_code="000" err_detail=""
             local INTERRUPTED=false
 
             if [[ "$BR_MODEL_STREAM" == "true" ]]; then
-                # Streaming Mode
                 local tmp_pipe=$(mktemp -u)
                 mkfifo "$tmp_pipe"
-
-                # Added --speed-time 30 --speed-limit 1 to abort if no data received for 30s
-                curl -s -N -w "\n%{http_code}" --max-time "$BR_TIMEOUT" --speed-time 30 --speed-limit 1 "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$tmp_pipe" &
+                curl -s -N -w "\n%{http_code}" --max-time "$BR_TIMEOUT" --speed-time 30 --speed-limit 1 \
+                    "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$tmp_pipe" &
                 local CURL_PID=$!
-
                 local DONE_RECEIVED=false
                 exec 3< "$tmp_pipe"
                 local sse_buffer=""
                 while true; do
-                    # Check for ESC key (Interrupt)
-                    if check_esc_interrupt 0.001; then
-                        INTERRUPTED=true
-                        break
-                    fi
-
-                    # Read from curl stream (non-blocking with short timeout)
+                    if check_esc_interrupt 0.001; then INTERRUPTED=true; break; fi
                     local partial=""
                     if IFS= read -t 0.1 -r partial <&3; then
-                        # Full line received
                         sse_buffer+="$partial"$'\n'
                     elif [[ -n "$partial" ]]; then
-                        # Partial line received due to timeout
-                        sse_buffer+="$partial"
-                        continue
+                        sse_buffer+="$partial"; continue
                     else
-                        # No data received
                         if ! kill -0 "$CURL_PID" 2>/dev/null; then
-                            # curl has exited
-                            if [[ -z "$sse_buffer" ]]; then
-                                break # No more data to process
-                            fi
-                            # Append a newline to flush any remaining buffer
+                            if [[ -z "$sse_buffer" ]]; then break; fi
                             sse_buffer+=$'\n'
                         else
-                            continue # Wait for more data
+                            continue
                         fi
                     fi
-
-                    # Process all complete lines in sse_buffer
                     while [[ "$sse_buffer" == *$'\n'* ]]; do
                         local line="${sse_buffer%%$'\n'*}"
                         sse_buffer="${sse_buffer#*$'\n'}"
-
-                        # Strip trailing carriage return if present
                         line="${line%$'\r'}"
-
                         [[ -z "$line" ]] && continue
-                        if [[ "$line" == "data: [DONE]" ]]; then
-                            DONE_RECEIVED=true
-                            break
-                        fi
-
+                        if [[ "$line" == "data: [DONE]" ]]; then DONE_RECEIVED=true; break; fi
                         if [[ "$line" =~ ^data:\ (.+)$ ]]; then
                             local json_data="${BASH_REMATCH[1]}"
-
-                            # Check for API error
                             local err_msg
                             err_msg=$(printf '%s' "$json_data" | jq -r '.error.message // empty' 2>/dev/null)
-                            if [[ -n "$err_msg" ]]; then
-                                api_error="$err_msg"
-                                break
-                            fi
-
-                            # Process reasoning content
+                            if [[ -n "$err_msg" ]]; then api_error="$err_msg"; break; fi
                             local reasoning_delta
                             reasoning_delta=$(printf '%s' "$json_data" | jq -j '.choices[0].delta.reasoning_content // empty' 2>/dev/null; printf x)
                             reasoning_delta="${reasoning_delta%x}"
                             if [[ -n "$reasoning_delta" ]]; then
                                 if [[ "$reasoning_started" == "false" ]]; then
-                                    printf "%s[THINK]" "${COLOR_DIM}"
-                                    reasoning_started=true
+                                    printf "%s[THINK]" "${COLOR_DIM}"; reasoning_started=true
                                 fi
                                 printf "%s" "$reasoning_delta"
                                 reasoning_content+="$reasoning_delta"
                             fi
-
-                            # Process response content
                             local content
                             content=$(printf '%s' "$json_data" | jq -j '.choices[0].delta.content // empty' 2>/dev/null; printf x)
                             content="${content%x}"
                             if [[ -n "$content" ]]; then
                                 if [[ "$reasoning_started" == "true" ]]; then
-                                    printf "[/THINK]%s\n\n" "${COLOR_RESET}"
-                                    reasoning_started=false
-                                    # Strip leading newlines to avoid excessive blank lines
-                                    while [[ "$content" =~ ^$'\n' ]]; do
-                                        content="${content:1}"
-                                    done
+                                    printf "[/THINK]%s\n\n" "${COLOR_RESET}"; reasoning_started=false
+                                    while [[ "$content" =~ ^$'\n' ]]; do content="${content:1}"; done
                                 fi
-                                if [[ -n "$content" ]]; then
-                                    printf "%s" "$content"
-                                    response_content+="$content"
-                                fi
+                                if [[ -n "$content" ]]; then printf "%s" "$content"; response_content+="$content"; fi
                             fi
-
-                            # Process tool calls (accumulate fragments by index)
                             local tc_count
                             tc_count=$(printf '%s' "$json_data" | jq -r '(.choices[0].delta.tool_calls // []) | length' 2>/dev/null)
                             if [[ "$tc_count" =~ ^[0-9]+$ ]] && [[ "$tc_count" -gt 0 ]]; then
                                 if [[ "$reasoning_started" == "true" ]]; then
-                                    printf "[/THINK]%s\n\n" "${COLOR_RESET}"
-                                    reasoning_started=false
+                                    printf "[/THINK]%s\n\n" "${COLOR_RESET}"; reasoning_started=false
                                 fi
                                 has_tool_calls=true
                                 for ((i=0; i<tc_count; i++)); do
                                     local idx
                                     idx=$(printf '%s' "$json_data" | jq -r ".choices[0].delta.tool_calls[$i].index" 2>/dev/null)
-                                    if [[ -z "$idx" || "$idx" == "null" ]]; then
-                                        continue
-                                    fi
-
-                                    if [[ -z "${current_tool_calls[$idx]}" ]]; then
-                                        current_tool_calls[$idx]="{}"
-                                    fi
-
-                                    local delta_tc
+                                    if [[ -z "$idx" || "$idx" == "null" ]]; then continue; fi
+                                    if [[ -z "${current_tool_calls[$idx]}" ]]; then current_tool_calls[$idx]="{}"; fi
+                                    local delta_tc merged_tc
                                     delta_tc=$(printf '%s' "$json_data" | jq -c ".choices[0].delta.tool_calls[$i]" 2>/dev/null)
-                                    local merged_tc
                                     merged_tc=$(printf '%s\n%s\n' "${current_tool_calls[$idx]}" "$delta_tc" | jq -s '
                                         .[0] as $base | .[1] as $delta |
                                         $base |
                                         if $delta.id then .id = $delta.id else . end |
                                         if $delta.type then .type = $delta.type else . end |
                                         if $delta.function then
-                                            .function = (
-                                                (.function // {}) |
+                                            .function = ((.function // {}) |
                                                 if $delta.function.name then .name = $delta.function.name else . end |
-                                                if $delta.function.arguments then
-                                                    .arguments = ((.arguments // "") + $delta.function.arguments)
-                                                else . end
-                                            )
-                                        else . end
-                                    ' 2>/dev/null)
-                                    if [[ -n "$merged_tc" ]]; then
-                                        current_tool_calls[$idx]="$merged_tc"
-                                    fi
+                                                if $delta.function.arguments then .arguments = ((.arguments // "") + $delta.function.arguments) else . end)
+                                        else . end' 2>/dev/null)
+                                    if [[ -n "$merged_tc" ]]; then current_tool_calls[$idx]="$merged_tc"; fi
                                 done
                             fi
                         elif [[ "$line" =~ ^[0-9]{3}$ ]]; then
                             http_code="$line"
                         fi
-                    done # End of processing complete lines
-
-                    if [[ "$DONE_RECEIVED" == "true" || -n "$api_error" ]]; then
-                        break
-                    fi
+                    done
+                    if [[ "$DONE_RECEIVED" == "true" || -n "$api_error" ]]; then break; fi
                 done
                 exec 3<&-
                 rm -f "$tmp_pipe"
-
                 if [[ "$INTERRUPTED" == "true" ]]; then
-                    kill "$CURL_PID" 2>/dev/null
-                    wait "$CURL_PID" 2>/dev/null
+                    kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null
                     printf "\n%s[INTERRUPTED]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
-                    unset 'CONVERSATION[-1]' # Remove the user message since it wasn't processed
-                    return 0
+                    unset 'CONVERSATION[-1]'; br_sync_msgs; return 0
                 fi
-
                 if [[ "$DONE_RECEIVED" == "true" || -n "$api_error" ]]; then
-                    kill "$CURL_PID" 2>/dev/null
-                    wait "$CURL_PID" 2>/dev/null
-                    curl_exit_code=0
+                    kill "$CURL_PID" 2>/dev/null; wait "$CURL_PID" 2>/dev/null; curl_exit_code=0
                 else
-                    wait "$CURL_PID" 2>/dev/null
-                    curl_exit_code=$?
+                    wait "$CURL_PID" 2>/dev/null; curl_exit_code=$?
                 fi
             else
                 # Non-Streaming Mode
                 local response_file=$(mktemp)
-                curl -s -w "\n%{http_code}" --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$response_file" &
+                curl -s -w "\n%{http_code}" --max-time "$BR_TIMEOUT" \
+                    "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body" > "$response_file" &
                 local CURL_PID=$!
-
                 while kill -0 "$CURL_PID" 2>/dev/null; do
-                    if check_esc_interrupt 0.1; then
-                        INTERRUPTED=true
-                        kill "$CURL_PID" 2>/dev/null
-                        break
-                    fi
+                    if check_esc_interrupt 0.1; then INTERRUPTED=true; kill "$CURL_PID" 2>/dev/null; break; fi
                 done
-                wait "$CURL_PID" 2>/dev/null
-                curl_exit_code=$?
-
+                wait "$CURL_PID" 2>/dev/null; curl_exit_code=$?
                 if [[ "$INTERRUPTED" == "true" ]]; then
                     rm -f "$response_file"
                     printf "\n%s[INTERRUPTED]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
-                    unset 'CONVERSATION[-1]' # Remove the user message since it wasn't processed
-                    return 0
+                    unset 'CONVERSATION[-1]'; br_sync_msgs; return 0
                 fi
-
                 local response_raw
-                response_raw=$(cat "$response_file")
-                rm -f "$response_file"
-
+                response_raw=$(cat "$response_file"); rm -f "$response_file"
                 http_code=$(printf '%s' "$response_raw" | tail -n 1)
                 local response
                 response=$(printf '%s' "$response_raw" | sed '$d')
-
                 if [[ -n "$response" ]]; then
                     local error_msg
                     error_msg=$(printf '%s' "$response" | jq -r '.error.message // empty' 2>/dev/null)
-                    if [[ -n "$error_msg" ]]; then
-                        api_error="$error_msg"
+                    if [[ -n "$error_msg" ]]; then api_error="$error_msg"
                     else
                         local message_json
                         message_json=$(printf '%s' "$response" | jq -c '.choices[0].message // empty' 2>/dev/null)
                         if [[ -n "$message_json" ]]; then
-                            response_content=$(printf '%s' "$message_json" | jq -j '.content // empty' 2>/dev/null; printf x)
-                            response_content="${response_content%x}"
-                            reasoning_content=$(printf '%s' "$message_json" | jq -j '.reasoning_content // empty' 2>/dev/null; printf x)
-                            reasoning_content="${reasoning_content%x}"
-
+                            response_content=$(printf '%s' "$message_json" | jq -j '.content // empty' 2>/dev/null; printf x); response_content="${response_content%x}"
+                            reasoning_content=$(printf '%s' "$message_json" | jq -j '.reasoning_content // empty' 2>/dev/null; printf x); reasoning_content="${reasoning_content%x}"
                             local tc_count
                             tc_count=$(printf '%s' "$message_json" | jq '(.tool_calls // []) | length' 2>/dev/null)
                             if [[ "$tc_count" =~ ^[0-9]+$ ]] && [[ "$tc_count" -gt 0 ]]; then
                                 has_tool_calls=true
                                 for ((i=0; i<tc_count; i++)); do
-                                    local tc_json
-                                    tc_json=$(printf '%s' "$message_json" | jq -c ".tool_calls[$i]" 2>/dev/null)
-                                    if [[ -n "$tc_json" ]]; then
-                                        current_tool_calls[$i]="$tc_json"
-                                    fi
+                                    current_tool_calls[$i]=$(printf '%s' "$message_json" | jq -c ".tool_calls[$i]" 2>/dev/null)
                                 done
                             fi
                         fi
@@ -1247,122 +1619,64 @@ oai_make_request() {
                 fi
             fi
 
-            # Determine if we should retry based on curl exit code and HTTP status
             local should_retry=false
-            if [[ $curl_exit_code -ne 0 ]]; then
-                should_retry=true
-                err_detail="Connection failed (curl exit code $curl_exit_code)"
-            elif [[ "$http_code" =~ ^5 ]]; then
-                should_retry=true
-                err_detail="Server error (HTTP $http_code)"
+            if [[ $curl_exit_code -ne 0 ]]; then should_retry=true; err_detail="Connection failed (curl exit code $curl_exit_code)"
+            elif [[ "$http_code" =~ ^5 ]]; then should_retry=true; err_detail="Server error (HTTP $http_code)"
             elif [[ -n "$api_error" ]]; then
-                if [[ "$http_code" =~ ^4 ]]; then
-                    should_retry=false
-                    err_detail="Client error (HTTP $http_code): $api_error"
-                else
-                    should_retry=true
-                    err_detail="API Error: $api_error"
-                fi
+                if [[ "$http_code" =~ ^4 ]]; then should_retry=false; err_detail="Client error (HTTP $http_code): $api_error"
+                else should_retry=true; err_detail="API Error: $api_error"; fi
             fi
-
-            # Execute retry wait if needed
             if [[ "$should_retry" == "true" ]]; then
                 if [[ $GLOBAL_RETRY_COUNT -gt $BR_RETRIES ]]; then
-                    echo -e "\n[Max retries ($BR_RETRIES) reached. Aborting request.]"
-                    return 1
+                    echo -e "\n[Max retries ($BR_RETRIES) reached. Aborting request.]"; return 1
                 fi
-
                 echo -e "\n[Error communicating with LLM server: $err_detail]"
                 echo "[Retry $GLOBAL_RETRY_COUNT/$BR_RETRIES in ${GLOBAL_RETRY_DELAY}s...]"
-
                 sleep "$GLOBAL_RETRY_DELAY"
-
-                # Exponential backoff
                 GLOBAL_RETRY_DELAY=$((GLOBAL_RETRY_DELAY * 2))
-                if [[ $GLOBAL_RETRY_DELAY -gt 128 ]]; then
-                    GLOBAL_RETRY_DELAY=2
-                fi
-                GLOBAL_RETRY_COUNT=$((GLOBAL_RETRY_COUNT + 1))
-                continue
+                if [[ $GLOBAL_RETRY_DELAY -gt 128 ]]; then GLOBAL_RETRY_DELAY=2; fi
+                GLOBAL_RETRY_COUNT=$((GLOBAL_RETRY_COUNT + 1)); continue
             fi
-
-            # Abort on fatal client error
             if [[ "$should_retry" == "false" && -n "$api_error" ]]; then
-                echo -e "\nAPI Error: $api_error"
-                return 1
+                echo -e "\nAPI Error: $api_error"; return 1
             fi
-
-            # Reset retry state on success
-            request_successful=true
-            GLOBAL_RETRY_COUNT=1
-            GLOBAL_RETRY_DELAY=2
+            request_successful=true; GLOBAL_RETRY_COUNT=1; GLOBAL_RETRY_DELAY=2
         done
 
-        # Close reasoning tag if stream ended while still in THINK block
-        if [[ "$reasoning_started" == "true" ]]; then
-            printf "[/THINK]%s\n\n" "${COLOR_RESET}"
-        fi
+        if [[ "$reasoning_started" == "true" ]]; then printf "[/THINK]%s\n\n" "${COLOR_RESET}"; fi
 
-        # Handle non-streaming output display
         if [[ "$BR_MODEL_STREAM" == "false" ]]; then
             if [[ -n "$reasoning_content" ]]; then
-                printf "%s[THINK]" "${COLOR_DIM}"
-                printf "%s" "$reasoning_content"
-                printf "[/THINK]%s\n\n" "${COLOR_RESET}"
+                printf "%s[THINK]" "${COLOR_DIM}"; printf "%s" "$reasoning_content"; printf "[/THINK]%s\n\n" "${COLOR_RESET}"
             fi
-            # Strip leading newlines from response_content
-            while [[ "$response_content" =~ ^$'\n' ]]; do
-                response_content="${response_content:1}"
-            done
-            if [[ -n "$response_content" ]]; then
-                printf "%s" "$response_content"
-            fi
+            while [[ "$response_content" =~ ^$'\n' ]]; do response_content="${response_content:1}"; done
+            if [[ -n "$response_content" ]]; then printf "%s" "$response_content"; fi
         fi
 
         if [[ "$has_tool_calls" == "true" ]]; then
-            # Ensure exactly one blank line between text and tool calls
             if [[ -n "$response_content" ]]; then
-                if [[ "$response_content" != *$'\n' ]]; then
-                    printf "\n\n"
-                elif [[ "$response_content" != *$'\n\n' ]]; then
-                    printf "\n"
-                fi
+                if [[ "$response_content" != *$'\n' ]]; then printf "\n\n"
+                elif [[ "$response_content" != *$'\n\n' ]]; then printf "\n"; fi
             fi
-
-            # Format accumulated tool calls using jq -s to bypass ARG_MAX limits
             local final_tool_calls="[]"
             if [[ ${#current_tool_calls[@]} -gt 0 ]]; then
                 final_tool_calls=$(printf '%s\n' "${current_tool_calls[@]}" | jq -s '[.[] | select(. != null and . != "")]')
             fi
-
-            # Append assistant message with tool_calls to history using temporary files for safety
-            local assistant_msg
-            local tmp_tc=$(mktemp)
-            printf '%s' "$final_tool_calls" > "$tmp_tc"
-
-            local tmp_reasoning="/dev/null"
-            if [[ -n "$reasoning_content" ]]; then
-                tmp_reasoning=$(mktemp)
-                printf '%s' "$reasoning_content" > "$tmp_reasoning"
-            fi
-
+            local assistant_msg tmp_tc tmp_reasoning
+            tmp_tc=$(mktemp); printf '%s' "$final_tool_calls" > "$tmp_tc"
+            tmp_reasoning="/dev/null"
+            if [[ -n "$reasoning_content" ]]; then tmp_reasoning=$(mktemp); printf '%s' "$reasoning_content" > "$tmp_reasoning"; fi
             if [[ -n "$response_content" ]]; then
                 assistant_msg=$(printf '%s' "$response_content" | jq -Rs \
-                    --slurpfile tc "$tmp_tc" \
-                    --rawfile rc "$tmp_reasoning" \
+                    --slurpfile tc "$tmp_tc" --rawfile rc "$tmp_reasoning" \
                     '{role: "assistant", content: ., tool_calls: ($tc[0] // [])} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
             else
-                assistant_msg=$(jq -n \
-                    --slurpfile tc "$tmp_tc" \
-                    --rawfile rc "$tmp_reasoning" \
+                assistant_msg=$(jq -n --slurpfile tc "$tmp_tc" --rawfile rc "$tmp_reasoning" \
                     '{role: "assistant", tool_calls: ($tc[0] // [])} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
             fi
-
-            [[ "$tmp_reasoning" != "/dev/null" ]] && rm -f "$tmp_reasoning"
-            rm -f "$tmp_tc"
+            [[ "$tmp_reasoning" != "/dev/null" ]] && rm -f "$tmp_reasoning"; rm -f "$tmp_tc"
             CONVERSATION+=("$assistant_msg")
 
-            # Execute each tool call sequentially
             local tc_length
             tc_length=$(printf '%s' "$final_tool_calls" | jq 'length')
             for ((i=0; i<tc_length; i++)); do
@@ -1371,148 +1685,182 @@ oai_make_request() {
                 func_name=$(printf '%s' "$final_tool_calls" | jq -r ".[$i].function.name")
                 args_json=$(printf '%s' "$final_tool_calls" | jq -r ".[$i].function.arguments")
                 tc_json=$(printf '%s' "$final_tool_calls" | jq -c ".[$i]")
-
                 printf "%s[TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf '%s' "$tc_json" | jq $JQ_COLOR_FLAG .
                 printf "%s[/TOOL_CALL]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
-
                 printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf "%s" "${COLOR_DIM}"
-                local tool_output
-                local tool_exit=0
+                local tool_output tool_exit=0
                 tool_output=$(execute_tool "$func_name" "$args_json" 2>&1) || tool_exit=$?
-
                 if [[ $tool_exit -ne 0 ]]; then
-                    if [[ "$tool_output" != Error:* ]]; then
-                        echo "Error: $tool_output"
-                        tool_output="Error: $tool_output"
-                    else
-                        echo "$tool_output"
-                    fi
-                else
-                    echo "$tool_output"
-                fi
+                    if [[ "$tool_output" != Error:* ]]; then echo "Error: $tool_output"; tool_output="Error: $tool_output"
+                    else echo "$tool_output"; fi
+                else echo "$tool_output"; fi
                 printf "%s[/TOOL_RESPONSE]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
-
-                # Append tool response to history for next API call safely via stdin
                 local tool_msg
                 tool_msg=$(printf '%s' "$tool_output" | jq -Rs --arg tool_call_id "$tc_id" '{role: "tool", content: ., tool_call_id: $tool_call_id}')
                 CONVERSATION+=("$tool_msg")
             done
-
-            # Loop again to send tool results back to LLM
             continue
         else
-            # No tool calls: append final assistant message and finish request
-            local assistant_msg
-            local tmp_reasoning="/dev/null"
-            if [[ -n "$reasoning_content" ]]; then
-                tmp_reasoning=$(mktemp)
-                printf '%s' "$reasoning_content" > "$tmp_reasoning"
-            fi
-
+            local assistant_msg tmp_reasoning
+            tmp_reasoning="/dev/null"
+            if [[ -n "$reasoning_content" ]]; then tmp_reasoning=$(mktemp); printf '%s' "$reasoning_content" > "$tmp_reasoning"; fi
             if [[ -n "$response_content" ]]; then
-                assistant_msg=$(printf '%s' "$response_content" | jq -Rs \
-                    --rawfile rc "$tmp_reasoning" \
+                assistant_msg=$(printf '%s' "$response_content" | jq -Rs --rawfile rc "$tmp_reasoning" \
                     '{role: "assistant", content: .} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
             else
-                assistant_msg=$(jq -n \
-                    --rawfile rc "$tmp_reasoning" \
+                assistant_msg=$(jq -n --rawfile rc "$tmp_reasoning" \
                     '{role: "assistant"} + (if $rc != "" then {reasoning_content: $rc} else {} end)')
             fi
             [[ "$tmp_reasoning" != "/dev/null" ]] && rm -f "$tmp_reasoning"
-
             CONVERSATION+=("$assistant_msg")
+            br_sync_msgs
             printf "\n"
             break
         fi
     done
 }
 
-# Initialize persistent input history for UP/DOWN arrow navigation.
-# `read -e` uses readline, which navigates bash's in-memory history list.
-# We preload from a file and append each accepted input so it survives restarts.
+# Input history
 init_input_history() {
     BR_HIST_DIR="${HOME}/.config/br"
     BR_HIST_FILE="${BR_HIST_DIR}/history"
     mkdir -p "$BR_HIST_DIR" 2>/dev/null
-
-    # Point bash history at our file and cap sizes.
     HISTFILE="$BR_HIST_FILE"
     HISTSIZE=1000
     HISTFILESIZE=1000
-    # Ignore duplicates and commands starting with space; don't strip all.
     HISTCONTROL="ignorespace:ignoredups"
-
-    # Load prior history into the in-memory list (errors are harmless if file is new).
     history -r "$BR_HIST_FILE" 2>/dev/null
 }
 
-# Append a single input line to in-memory history and persist to disk.
-# Multi-line inputs are stored as a single history entry by bash.
 append_input_history() {
     local entry="$1"
     [[ -z "$entry" ]] && return 0
-    history -s "$entry"          # add to in-memory list (powers UP/DOWN on next read)
-    history -a "$BR_HIST_FILE" 2>/dev/null  # append new entries to disk
+    history -s "$entry"
+    history -a "$BR_HIST_FILE" 2>/dev/null
 }
 
+# Main
 main() {
-    # Initialize session headers first so they are available for read_env_vars
-    SESSION_AFFINITY=$(uuidgen)
-    CONVERSATION_ID=$(uuidgen)
+    # Auto-create initial session + conversation
+    local init_sid init_sname init_cid init_cname
+    init_sid=$(gen_uuid)
+    init_sname="${init_sid: -12}"
+    init_cid=$(gen_uuid)
+    init_cname="${init_cid: -12}"
 
-    # Initialize the environment before entering the loop
+    # Fallback for rare collisions
+    while [[ -n "${SESSIONS[$init_sname]+x}" ]]; do init_sname="${init_sname}_1"; done
+    while [[ -n "${CONVS["$init_sname|$init_cname"]+x}" ]]; do init_cname="${init_cname}_1"; done
+
+    SESSIONS["$init_sname"]="$init_sid"
+    CONVS["$init_sname|$init_cname"]="$init_cid"
+    MSGS["$init_sname|$init_cname"]="[]"
+
+    CUR_SESSION_NAME="$init_sname"
+    CUR_CONV_NAME="$init_cname"
+    br_update_headers
+
     read_env_vars
     init_conversation
-
-    # Load persistent input history (for UP/DOWN arrow recall)
     init_input_history
 
-    # Main loop
     while true; do
         echo
-
-        # Drain any buffered keystrokes (e.g., UP/DOWN arrows) from the previous generation
-        # so they don't trigger history navigation or commands on the next prompt.
+        # Drain buffered keystrokes
         while IFS= read -t 0.01 -n 1 -r _ 2>/dev/null; do :; done
 
-        # -p: prompt
-        # -d $'\r': delimiter to capture embedded newlines
-        # -e: enable readline (powers UP/DOWN history navigation)
-        # -r: raw input
         read -p "User: " -d $'\r' -e -r message
-
-        # Break loop on EOF (Ctrl+D) to prevent infinite empty loops
         [[ -z "$message" ]] && break
-
-        # Save input to history so UP/DOWN can recall it later (skip empty).
         append_input_history "$message"
 
-        # Handle exit commands
-        if [[ "$message" == "/exit" || "$message" == "/quit" ]]; then
-            break
-        fi
+        # Exit
+        if [[ "$message" == "/exit" || "$message" == "/quit" ]]; then break; fi
 
-        # Handle new session command - reset history and generate fresh session headers
-        if [[ "$message" == "/new" ]]; then
-            printf "%s[INFO] Previous session closed. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
-            init_conversation
-            SESSION_AFFINITY=$(uuidgen)
-            CONVERSATION_ID=$(uuidgen)
-            print_config_and_headers
+        # /info
+        if [[ "$message" == "/info" ]]; then br_info; continue; fi
+
+        # /help
+        if [[ "$message" == "/help" ]]; then
+            cat <<EOF
+ ${COLOR_DIM}General:${COLOR_RESET}
+  /info              Print config and current session/conversation info
+  /dump              Print current conversation messages as JSON
+  /pop               Pop last message from current conversation
+  /compact           Summarize and compact current conversation
+  /history           Show input history
+  /history clear     Clear input history
+  /exit, /quit       Exit
+
+ ${COLOR_DIM}Session (/session ...):${COLOR_RESET}
+  /session ls                          List all sessions
+  /session new [name]                  Create new session, switch to it
+  /session clear [id-or-name]          Remove all conversations in session (default: current)
+  /session mv <new>                    Rename current session to <new>
+  /session mv <old> <new>              Rename session <old> (id-or-name) to <new>
+  /session cp <new>                    Copy current session to <new>
+  /session cp <old> <new>              Copy session <old> (id-or-name) to <new>
+  /session rm [id-or-name]             Remove session (current if no name)
+  /session dump [id-or-name]           Dump session as pretty JSON
+  /session resume <id-or-name>         Switch to session
+  /session save <file>                 Save all sessions to file
+  /session save <id-or-name> <file>    Save single session to file
+  /session load <file>                 Load all sessions from file (merge)
+  /session load <file> <name>          Load single session into <name>
+
+ ${COLOR_DIM}Conversations (/session conv ...):${COLOR_RESET}
+  /session conv ls                              List conversations in current session
+  /session conv new [sess] [conv]               Create new conversation, switch to it
+  /session conv rm [sess] [conv]                Remove conversation
+  /session conv clear [sess] [conv]             Clear messages of conversation
+  /session conv mv <new>                        Rename current conversation
+  /session conv mv <old> <new>                  Rename conversation in current session
+  /session conv mv <s1> <c1> <s2> <c2>          Move conversation across sessions
+  /session conv cp <new>                        Copy current conversation
+  /session conv cp <old> <new>                  Copy conversation in current session
+  /session conv cp <s1> <c1> <s2> <c2>          Copy conversation across sessions
+  /session conv resume <conv>                   Resume conversation in current session
+  /session conv resume <sess> <conv>            Resume conversation in session <sess>
+  /session conv save <file>                     Save all convs of current session
+  /session conv save <conv> <file>              Save single conversation
+  /session conv load <file>                     Load convs into current session (merge)
+  /session conv load <file> <conv>              Load single conv into <conv>
+
+ ${COLOR_DIM}Conversations in current session (/conv ...):${COLOR_RESET}
+  /conv ls                          List conversations in current session
+  /conv new [name]                  Create new conversation, switch to it
+  /conv rm [name]                   Remove conversation
+  /conv clear [name]                Clear messages of conversation
+  /conv mv <new>                    Rename current conversation
+  /conv mv <old> <new>              Rename conversation
+  /conv cp <new>                    Copy current conversation
+  /conv cp <old> <new>              Copy conversation
+  /conv resume <name>               Resume conversation
+  /conv save <file>                 Save all convs of current session
+  /conv save <conv> <file>          Save single conversation
+  /conv load <file>                 Load convs into current session (merge)
+  /conv load <file> <conv>          Load single conv into <conv>
+
+ ${COLOR_DIM}Shorthands for current session convs:${COLOR_RESET}
+  /ls                               Shorthand for /conv ls
+  /new [name]                       Shorthand for /conv new [name]
+  /clear [name]                     Shorthand for /conv clear [name]
+  /rm [name]                        Shorthand for /conv rm [name]
+  /mv <new>                         Shorthand for /conv mv <new>
+  /mv <old> <new>                   Shorthand for /conv mv <old> <new>
+  /cp <new>                         Shorthand for /conv cp <new>
+  /cp <old> <new>                   Shorthand for /conv cp <old> <new>
+  /resume <name>                    Shorthand for /conv resume <name>
+  /save <file>                      Shorthand for /conv save <file>
+  /save <conv> <file>               Shorthand for /conv save <conv> <file>
+  /load <file>                      Shorthand for /conv load <file>
+  /load <file> <conv>               Shorthand for /conv load <file> <conv>
+EOF
             continue
         fi
 
-        # Handle clear command - wipe history but keep current session headers
-        # (same conversation from the server's perspective, just empty history)
-        if [[ "$message" == "/clear" ]]; then
-            printf "%s[INFO] Conversation history cleared. Session headers retained. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
-            init_conversation
-            continue
-        fi
-
-        # Handle dump command for debugging
+        # /dump
         if [[ "$message" == "/dump" ]]; then
             local messages_json="[]"
             if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
@@ -1524,58 +1872,93 @@ main() {
             continue
         fi
 
-        # Handle pop command
+        # /pop
         if [[ "$message" == "/pop" ]]; then
             if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
-                local last_msg="${CONVERSATION[-1]}"
                 echo "${COLOR_DIM}[MESSAGE]${COLOR_RESET}"
-                printf '%s' "$last_msg" | jq $JQ_COLOR_FLAG .
+                printf '%s' "${CONVERSATION[-1]}" | jq $JQ_COLOR_FLAG .
                 echo "${COLOR_DIM}[/MESSAGE]${COLOR_RESET}"
                 unset 'CONVERSATION[-1]'
+                br_sync_msgs
             else
                 printf "%s[INFO] Conversation is empty. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
             fi
             continue
         fi
 
-        # Handle compact command
+        # /compact
         if [[ "$message" == "/compact" ]]; then
-            compact_conversation
-            continue
+            compact_conversation; continue
         fi
 
-        # Handle history command - show recent input history
+        # /history
         if [[ "$message" == "/history" ]]; then
             echo "${COLOR_DIM}[INPUT HISTORY]${COLOR_RESET}"
             history 2>/dev/null | sed "s/^/  /"
             echo "${COLOR_DIM}[/INPUT HISTORY]${COLOR_RESET}"
             continue
         fi
-
-        # Handle history clear command - wipes both in-memory and file-backed input history
         if [[ "$message" == "/history clear" ]]; then
-            history -c 2>/dev/null
-            : > "$BR_HIST_FILE" 2>/dev/null
+            history -c 2>/dev/null; : > "$BR_HIST_FILE" 2>/dev/null
             printf "%s[INFO] Input history cleared. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
             continue
         fi
 
-        # Handle help command
-        if [[ "$message" == "/help" ]]; then
-            echo "${COLOR_DIM}Available commands:${COLOR_RESET}"
-            echo "  /help           Show this help message"
-            echo "  /dump           Print the current conversation history as JSON"
-            echo "  /pop            Pop the last message from conversation history"
-            echo "  /compact        Summarize and compact the conversation history"
-            echo "  /new            Clear conversation history and start a new session (new headers)"
-            echo "  /clear          Clear conversation history but keep current session headers"
-            echo "  /history        Show recent input history (also recallable via UP/DOWN arrows)"
-            echo "  /history clear  Clear all input history records"
-            echo "  /exit           Exit the agent harness"
-            echo "  /quit           Alias for /exit"
+        # /session ...
+        if [[ "$message" == "/session" || "$message" == /session\ * ]]; then
+            local rest="${message#/session}"
+            rest="${rest# }"
+            local -a sargs
+            read -ra sargs <<< "$rest"
+            local sub="${sargs[0]:-}"
+            local -a sub_args=("${sargs[@]:1}")
+            br_handle_session "$sub" "${sub_args[@]}"
             continue
         fi
 
+        # /conv ... (independent command, current session only)
+        if [[ "$message" == "/conv" || "$message" == /conv\ * ]]; then
+            local rest="${message#/conv}"
+            rest="${rest# }"
+            local -a sargs
+            read -ra sargs <<< "$rest"
+            local sub="${sargs[0]:-}"
+            local -a sub_args=("${sargs[@]:1}")
+            br_handle_conv "$sub" "${sub_args[@]}"
+            continue
+        fi
+
+        # Shorthand commands for /conv
+        case "$message" in
+            /ls|/new|/clear|/rm|/mv|/cp|/resume|/save|/load|/ls\ *|/new\ *|/clear\ *|/rm\ *|/mv\ *|/cp\ *|/resume\ *|/save\ *|/load\ *)
+                local rest="${message#* }"
+                if [[ "$message" == /ls || "$message" == /new || "$message" == /clear || "$message" == /rm || "$message" == /mv || "$message" == /cp || "$message" == /resume || "$message" == /save || "$message" == /load ]]; then
+                    rest=""
+                fi
+                local cmd="${message%% *}"
+                local sub="ls"
+                case "$cmd" in
+                    /new) sub="new" ;;
+                    /clear) sub="clear" ;;
+                    /rm) sub="rm" ;;
+                    /mv) sub="mv" ;;
+                    /cp) sub="cp" ;;
+                    /resume) sub="resume" ;;
+                    /save) sub="save" ;;
+                    /load) sub="load" ;;
+                esac
+                local -a sargs
+                if [[ -n "$rest" ]]; then
+                    read -ra sargs <<< "$rest"
+                else
+                    sargs=()
+                fi
+                br_handle_conv "$sub" "${sargs[@]}"
+                continue
+                ;;
+        esac
+
+        # Send to LLM
         echo
         echo -n "Assistant: "
         oai_make_request "$message"
