@@ -52,6 +52,25 @@ else
     JQ_COLOR_FLAG=""
 fi
 
+# Standard logging functions with tag formatting and color
+br_log_info() {
+    local msg
+    printf -v msg "$@"
+    printf "%s[INFO] %s [/INFO]%s\n" "${COLOR_DIM}" "$msg" "${COLOR_RESET}"
+}
+
+br_log_debug() {
+    local msg
+    printf -v msg "$@"
+    printf "%s[DEBUG] %s [/DEBUG]%s\n" "${COLOR_DIM}" "$msg" "${COLOR_RESET}"
+}
+
+br_log_error() {
+    local msg
+    printf -v msg "$@"
+    printf "%s[ERROR] %s [/ERROR]%s\n" "${COLOR_DIM}" "$msg" "${COLOR_RESET}"
+}
+
 # Save terminal state for restoration on exit
 OLD_STTY=$(stty -g 2>/dev/null || true)
 
@@ -424,11 +443,11 @@ br_update_headers() {
 # Check if current session and conversation are valid
 br_check_current() {
     if [[ -z "$CUR_SESSION_NAME" ]] || [[ -z "${SESSIONS[$CUR_SESSION_NAME]+x}" ]]; then
-        printf "%s[ERROR] No active session. Use /session new or /session resume. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        br_log_error "No active session. Use /session new or /session resume."
         return 1
     fi
     if [[ -z "$CUR_CONV_NAME" ]] || [[ -z "${CONVS["$CUR_SESSION_NAME|$CUR_CONV_NAME"]+x}" ]]; then
-        printf "%s[ERROR] No active conversation. Use /session conv new or /session conv resume. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        br_log_error "No active conversation. Use /session conv new or /session conv resume."
         return 1
     fi
     return 0
@@ -453,14 +472,14 @@ br_info() {
     else
         echo "  (no current conversation)"
     fi
-    printf "%s[INFO] Type /help to see all commands and examples. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+    br_log_info "Type /help to see all commands and examples."
 }
 
 # Session commands
 
 br_session_ls() {
     if [[ ${#SESSIONS[@]} -eq 0 ]]; then
-        printf "%s[INFO] No sessions. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        br_log_info "No sessions."
         return 0
     fi
     printf "%s%-40s %-40s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "CONVS" "${COLOR_RESET}"
@@ -476,11 +495,11 @@ br_session_new() {
     id=$(gen_uuid)
     name="${1:-${id: -12}}" # default to last 12 chars of UUID
     if ! is_valid_name "$name"; then
-        printf "%s[ERROR] Invalid session name (no spaces or '|'). [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        br_log_error "Invalid session name (no spaces or '|')."
         return 1
     fi
     if [[ -n "${SESSIONS[$name]+x}" ]]; then
-        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+        br_log_error "Session '%s' already exists." "$name"
         return 1
     fi
     br_sync_msgs
@@ -489,7 +508,7 @@ br_session_new() {
     CUR_CONV_NAME=""
     CONVERSATION=()
     br_update_headers
-    printf "%s[INFO] Created and switched to session '%s' (id: %s). No current conversation. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$id" "${COLOR_RESET}"
+    br_log_info "Created and switched to session '%s' (id: %s). No current conversation." "$name" "$id"
 }
 
 br_session_clear() {
@@ -497,10 +516,10 @@ br_session_clear() {
     if [[ -z "$1" ]]; then
         sess="$CUR_SESSION_NAME"
     else
-        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
     fi
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     local -a to_remove=()
     for key in "${!CONVS[@]}"; do
@@ -514,29 +533,30 @@ br_session_clear() {
         CUR_CONV_NAME=""
         CONVERSATION=()
         br_update_headers
-        printf "%s[INFO] Cleared all conversations in current session '%s'. No current conversation. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "${COLOR_RESET}"
+        br_log_info "Cleared all conversations in current session '%s'. No current conversation." "$sess"
     else
-        printf "%s[INFO] Cleared all conversations in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "${COLOR_RESET}"
+        br_log_info "Cleared all conversations in session '%s'." "$sess"
     fi
 }
 
 br_session_mv() {
     local old new
     if [[ $# -eq 1 ]]; then
-        [[ -z "$CUR_SESSION_NAME" ]] && { printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1; }
+        [[ -z "$CUR_SESSION_NAME" ]] && { br_log_error "No current session."; return 1; }
         old="$CUR_SESSION_NAME"; new="$1"
     elif [[ $# -eq 2 ]]; then
-        old=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        old=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
         new="$2"
     else
-        printf "%s[ERROR] Usage: /session mv <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session mv <new> | <old> <new>."; return 1
     fi
     if [[ -n "${SESSIONS[$new]+x}" ]]; then
-        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"
+        br_log_error "Session '%s' already exists." "$new"
         return 1
     fi
     if ! is_valid_name "$new"; then
-        printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Invalid session name."
+        return 1
     fi
     br_sync_msgs
     SESSIONS[$new]="${SESSIONS[$old]}"
@@ -558,26 +578,27 @@ br_session_mv() {
         CUR_SESSION_NAME="$new"
     fi
     br_update_headers
-    printf "%s[INFO] Renamed session '%s' -> '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$old" "$new" "${COLOR_RESET}"
+    br_log_info "Renamed session '%s' -> '%s'." "$old" "$new"
 }
 
 br_session_cp() {
     local old new
     if [[ $# -eq 1 ]]; then
-        [[ -z "$CUR_SESSION_NAME" ]] && { printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1; }
+        [[ -z "$CUR_SESSION_NAME" ]] && { br_log_error "No current session."; return 1; }
         old="$CUR_SESSION_NAME"; new="$1"
     elif [[ $# -eq 2 ]]; then
-        old=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        old=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
         new="$2"
     else
-        printf "%s[ERROR] Usage: /session cp <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session cp <new> | <old> <new>."; return 1
     fi
     if [[ -n "${SESSIONS[$new]+x}" ]]; then
-        printf "%s[ERROR] Session '%s' already exists. [/ERROR]%s\n" "${COLOR_DIM}" "$new" "${COLOR_RESET}"
+        br_log_error "Session '%s' already exists." "$new"
         return 1
     fi
     if ! is_valid_name "$new"; then
-        printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Invalid session name."
+        return 1
     fi
     br_sync_msgs
     local new_id=$(gen_uuid)
@@ -592,7 +613,7 @@ br_session_cp() {
         fi
     done
     br_update_headers
-    printf "%s[INFO] Copied session '%s' -> '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$old" "$new" "${COLOR_RESET}"
+    br_log_info "Copied session '%s' -> '%s'." "$old" "$new"
 }
 
 br_session_rm() {
@@ -600,10 +621,10 @@ br_session_rm() {
     if [[ -z "$1" ]]; then
         name="$CUR_SESSION_NAME"
     else
-        name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
     fi
     if [[ -z "$name" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     br_sync_msgs
     unset "SESSIONS[$name]"
@@ -620,10 +641,10 @@ br_session_rm() {
         CUR_CONV_NAME=""
         CONVERSATION=()
         br_update_headers
-        printf "%s[INFO] Removed current session '%s'. No current session/conversation. Use /session resume or /session new. [/INFO]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+        br_log_info "Removed current session '%s'. No current session/conversation. Use /session resume or /session new." "$name"
     else
         br_update_headers
-        printf "%s[INFO] Removed session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+        br_log_info "Removed session '%s'." "$name"
     fi
 }
 
@@ -653,10 +674,10 @@ br_session_dump() {
     if [[ -z "$1" ]]; then
         name="$CUR_SESSION_NAME"
     else
-        name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
     fi
     if [[ -z "$name" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     br_sync_msgs
     br_dump_session_json "$name" | jq $JQ_COLOR_FLAG .
@@ -665,15 +686,15 @@ br_session_dump() {
 br_session_resume() {
     local name
     if [[ -z "$1" ]]; then
-        printf "%s[ERROR] Usage: /session resume <id-or-name>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session resume <id-or-name>."; return 1
     fi
-    name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+    name=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
     br_sync_msgs
     CUR_SESSION_NAME="$name"
     CUR_CONV_NAME=""
     CONVERSATION=()
     br_update_headers
-    printf "%s[INFO] Resumed session '%s'. No current conversation set. [/INFO]%s\n" "${COLOR_DIM}" "$name" "${COLOR_RESET}"
+    br_log_info "Resumed session '%s'. No current conversation set." "$name"
 }
 
 br_session_save() {
@@ -685,23 +706,23 @@ br_session_save() {
             sessions_json=$(printf '%s\n%s' "$sessions_json" "$sjson" | jq -s '.')
         done
         jq -n --argjson sessions "$sessions_json" '{sessions: $sessions}' > "$file"
-        printf "%s[INFO] Saved %d session(s) to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "${#SESSIONS[@]}" "$file" "${COLOR_RESET}"
+        br_log_info "Saved %d session(s) to '%s'." "${#SESSIONS[@]}" "$file"
     elif [[ $# -eq 2 ]]; then
         local name file
-        name=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
         file="$2"
         br_sync_msgs
         br_dump_session_json "$name" | jq . > "$file"
-        printf "%s[INFO] Saved session '%s' to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$file" "${COLOR_RESET}"
+        br_log_info "Saved session '%s' to '%s'." "$name" "$file"
     else
-        printf "%s[ERROR] Usage: /session save <file> | <id-or-name> <file>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session save <file> | <id-or-name> <file>."; return 1
     fi
 }
 
 br_session_load() {
     if [[ $# -eq 1 ]]; then
         local file="$1"
-        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        [[ ! -f "$file" ]] && { br_log_error "File not found: %s." "$file"; return 1; }
         br_sync_msgs
         local data=$(cat "$file")
         local count=0
@@ -722,12 +743,12 @@ br_session_load() {
             ((count++))
         done
         br_sync_msgs; br_load_msgs; br_update_headers
-        printf "%s[INFO] Loaded %d session(s) from '%s'. Same-name sessions replaced. [/INFO]%s\n" "${COLOR_DIM}" "$count" "$file" "${COLOR_RESET}"
+        br_log_info "Loaded %d session(s) from '%s'. Same-name sessions replaced." "$count" "$file"
     elif [[ $# -eq 2 ]]; then
         local file="$1" name="$2"
-        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        [[ ! -f "$file" ]] && { br_log_error "File not found: %s." "$file"; return 1; }
         if ! is_valid_name "$name"; then
-            printf "%s[ERROR] Invalid session name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+            br_log_error "Invalid session name."; return 1
         fi
         br_sync_msgs
         local data=$(cat "$file")
@@ -755,9 +776,9 @@ br_session_load() {
             CONVS[$key]="$cid"; MSGS[$key]="$cmsgs"
         done
         br_sync_msgs; br_load_msgs; br_update_headers
-        printf "%s[INFO] Loaded session into '%s' from '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$file" "${COLOR_RESET}"
+        br_log_info "Loaded session into '%s' from '%s'." "$name" "$file"
     else
-        printf "%s[ERROR] Usage: /session load <file> | <file> <name>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session load <file> | <file> <name>."; return 1
     fi
 }
 
@@ -768,17 +789,17 @@ br_conv_ls() {
     if [[ -z "$1" ]]; then
         sess="$CUR_SESSION_NAME"
     else
-        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
     fi
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     local -a convs_in_sess=()
     for key in "${!CONVS[@]}"; do
         [[ "$key" == "${sess}|"* ]] && convs_in_sess+=("${key#${sess}|}")
     done
     if [[ ${#convs_in_sess[@]} -eq 0 ]]; then
-        printf "%s[INFO] No conversations in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "${COLOR_RESET}"
+        br_log_info "No conversations in session '%s'." "$sess"
         return 0
     fi
     printf "%s%-40s %-40s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "MSGS" "${COLOR_RESET}"
@@ -796,19 +817,19 @@ br_conv_new() {
     elif [[ $# -eq 1 ]]; then
         sess="$CUR_SESSION_NAME"; name="$1"; id=$(gen_uuid)
     elif [[ $# -eq 2 ]]; then
-        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
         name="$2"; id=$(gen_uuid)
     else
-        printf "%s[ERROR] Usage: /session conv new [sess] [conv]. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv new [sess] [conv]."; return 1
     fi
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No current session. Specify session or set one. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session. Specify session or set one."; return 1
     fi
     if ! is_valid_name "$name"; then
-        printf "%s[ERROR] Invalid conv name (no spaces or '|'). [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Invalid conv name (no spaces or '|')."; return 1
     fi
     if [[ -n "${CONVS["$sess|$name"]+x}" ]]; then
-        printf "%s[ERROR] Conversation '%s' already exists in session '%s'. [/ERROR]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"; return 1
+        br_log_error "Conversation '%s' already exists in session '%s'." "$name" "$sess"; return 1
     fi
     br_sync_msgs
     local key="${sess}|${name}"
@@ -818,7 +839,7 @@ br_conv_new() {
     CUR_CONV_NAME="$name"
     CONVERSATION=()
     br_update_headers
-    printf "%s[INFO] Created and switched to conversation '%s' (id: %s) in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$id" "$sess" "${COLOR_RESET}"
+    br_log_info "Created and switched to conversation '%s' (id: %s) in session '%s'." "$name" "$id" "$sess"
 }
 
 br_conv_rm() {
@@ -826,18 +847,18 @@ br_conv_rm() {
     if [[ $# -eq 0 ]]; then
         sess="$CUR_SESSION_NAME"; name="$CUR_CONV_NAME"
     elif [[ $# -eq 1 ]]; then
-        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
     elif [[ $# -eq 2 ]]; then
-        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
-        name=$(get_conv_name "$sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+        sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
+        name=$(get_conv_name "$sess" "$2") || { br_log_error "Conversation '%s' does not exist." "$2"; return 1; }
     else
-        printf "%s[ERROR] Usage: /session conv rm [sess] [conv]. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv rm [sess] [conv]."; return 1
     fi
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No session specified. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No session specified."; return 1
     fi
     if [[ -z "$name" ]]; then
-        printf "%s[ERROR] No conversation specified. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No conversation specified."; return 1
     fi
     br_sync_msgs
     local key="${sess}|${name}"
@@ -846,9 +867,9 @@ br_conv_rm() {
         CUR_CONV_NAME=""
         CONVERSATION=()
         br_update_headers
-        printf "%s[INFO] Removed current conversation '%s' from session '%s'. No current conversation. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"
+        br_log_info "Removed current conversation '%s' from session '%s'. No current conversation." "$name" "$sess"
     else
-        printf "%s[INFO] Removed conversation '%s' from session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"
+        br_log_info "Removed conversation '%s' from session '%s'." "$name" "$sess"
     fi
 }
 
@@ -858,24 +879,24 @@ br_conv_mv() {
         src_sess="$CUR_SESSION_NAME"; src_conv="$CUR_CONV_NAME"
         dst_sess="$CUR_SESSION_NAME"; dst_conv="$1"
     elif [[ $# -eq 2 ]]; then
-        src_sess="$CUR_SESSION_NAME"; src_conv=$(get_conv_name "$src_sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        src_sess="$CUR_SESSION_NAME"; src_conv=$(get_conv_name "$src_sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
         dst_sess="$CUR_SESSION_NAME"; dst_conv="$2"
     elif [[ $# -eq 4 ]]; then
-        src_sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
-        src_conv=$(get_conv_name "$src_sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
-        dst_sess=$(get_sess_name "$3") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$3" "${COLOR_RESET}"; return 1; }
+        src_sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
+        src_conv=$(get_conv_name "$src_sess" "$2") || { br_log_error "Conversation '%s' does not exist." "$2"; return 1; }
+        dst_sess=$(get_sess_name "$3") || { br_log_error "Session '%s' does not exist." "$3"; return 1; }
         dst_conv="$4"
     else
-        printf "%s[ERROR] Usage: /session conv mv <new> | <old> <new> | <s1> <c1> <s2> <c2>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv mv <new> | <old> <new> | <s1> <c1> <s2> <c2>."; return 1
     fi
     if [[ -z "$src_sess" || -z "$src_conv" ]]; then
-        printf "%s[ERROR] No current conversation. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current conversation."; return 1
     fi
     if [[ -n "${CONVS["$dst_sess|$dst_conv"]+x}" ]]; then
-        printf "%s[ERROR] Conversation '%s' already exists in '%s'. [/ERROR]%s\n" "${COLOR_DIM}" "$dst_conv" "$dst_sess" "${COLOR_RESET}"; return 1
+        br_log_error "Conversation '%s' already exists in '%s'." "$dst_conv" "$dst_sess"; return 1
     fi
     if ! is_valid_name "$dst_conv"; then
-        printf "%s[ERROR] Invalid conv name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Invalid conv name."; return 1
     fi
     br_sync_msgs
     local src_key="${src_sess}|${src_conv}"
@@ -888,7 +909,7 @@ br_conv_mv() {
         br_load_msgs
     fi
     br_update_headers
-    printf "%s[INFO] Moved conversation '%s' (session '%s') -> '%s' (session '%s'). [/INFO]%s\n" "${COLOR_DIM}" "$src_conv" "$src_sess" "$dst_conv" "$dst_sess" "${COLOR_RESET}"
+    br_log_info "Moved conversation '%s' (session '%s') -> '%s' (session '%s')." "$src_conv" "$src_sess" "$dst_conv" "$dst_sess"
 }
 
 br_conv_cp() {
@@ -897,24 +918,24 @@ br_conv_cp() {
         src_sess="$CUR_SESSION_NAME"; src_conv="$CUR_CONV_NAME"
         dst_sess="$CUR_SESSION_NAME"; dst_conv="$1"
     elif [[ $# -eq 2 ]]; then
-        src_sess="$CUR_SESSION_NAME"; src_conv=$(get_conv_name "$src_sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        src_sess="$CUR_SESSION_NAME"; src_conv=$(get_conv_name "$src_sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
         dst_sess="$CUR_SESSION_NAME"; dst_conv="$2"
     elif [[ $# -eq 4 ]]; then
-        src_sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
-        src_conv=$(get_conv_name "$src_sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
-        dst_sess=$(get_sess_name "$3") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$3" "${COLOR_RESET}"; return 1; }
+        src_sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
+        src_conv=$(get_conv_name "$src_sess" "$2") || { br_log_error "Conversation '%s' does not exist." "$2"; return 1; }
+        dst_sess=$(get_sess_name "$3") || { br_log_error "Session '%s' does not exist." "$3"; return 1; }
         dst_conv="$4"
     else
-        printf "%s[ERROR] Usage: /session conv cp <new> | <old> <new> | <s1> <c1> <s2> <c2>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv cp <new> | <old> <new> | <s1> <c1> <s2> <c2>."; return 1
     fi
     if [[ -z "$src_sess" || -z "$src_conv" ]]; then
-        printf "%s[ERROR] No current conversation. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current conversation."; return 1
     fi
     if [[ -n "${CONVS["$dst_sess|$dst_conv"]+x}" ]]; then
-        printf "%s[ERROR] Conversation '%s' already exists in '%s'. [/ERROR]%s\n" "${COLOR_DIM}" "$dst_conv" "$dst_sess" "${COLOR_RESET}"; return 1
+        br_log_error "Conversation '%s' already exists in '%s'." "$dst_conv" "$dst_sess"; return 1
     fi
     if ! is_valid_name "$dst_conv"; then
-        printf "%s[ERROR] Invalid conv name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Invalid conv name."; return 1
     fi
     br_sync_msgs
     local src_key="${src_sess}|${src_conv}"
@@ -922,27 +943,27 @@ br_conv_cp() {
     CONVS[$dst_key]=$(gen_uuid)
     MSGS[$dst_key]="${MSGS[$src_key]}"
     br_update_headers
-    printf "%s[INFO] Copied conversation '%s' (session '%s') -> '%s' (session '%s'). [/INFO]%s\n" "${COLOR_DIM}" "$src_conv" "$src_sess" "$dst_conv" "$dst_sess" "${COLOR_RESET}"
+    br_log_info "Copied conversation '%s' (session '%s') -> '%s' (session '%s')." "$src_conv" "$src_sess" "$dst_conv" "$dst_sess"
 }
 
 br_conv_resume() {
     local sess name
     if [[ $# -eq 1 ]]; then
-        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
     elif [[ $# -eq 2 ]]; then
-        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
-        name=$(get_conv_name "$sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+        sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
+        name=$(get_conv_name "$sess" "$2") || { br_log_error "Conversation '%s' does not exist." "$2"; return 1; }
     else
-        printf "%s[ERROR] Usage: /session conv resume <conv> | <sess> <conv>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv resume <conv> | <sess> <conv>."; return 1
     fi
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     br_sync_msgs
     CUR_SESSION_NAME="$sess"; CUR_CONV_NAME="$name"
     br_load_msgs
     br_update_headers
-    printf "%s[INFO] Resumed conversation '%s' in session '%s' (%d messages). [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "$(count_msgs_in_conv "$sess" "$name")" "${COLOR_RESET}"
+    br_log_info "Resumed conversation '%s' in session '%s' (%d messages)." "$name" "$sess" "$(count_msgs_in_conv "$sess" "$name")"
 }
 
 br_conv_clear() {
@@ -950,57 +971,57 @@ br_conv_clear() {
     if [[ $# -eq 0 ]]; then
         sess="$CUR_SESSION_NAME"; name="$CUR_CONV_NAME"
     elif [[ $# -eq 1 ]]; then
-        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
     elif [[ $# -eq 2 ]]; then
-        sess=$(get_sess_name "$1") || { printf "%s[ERROR] Session '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
-        name=$(get_conv_name "$sess" "$2") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$2" "${COLOR_RESET}"; return 1; }
+        sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
+        name=$(get_conv_name "$sess" "$2") || { br_log_error "Conversation '%s' does not exist." "$2"; return 1; }
     else
-        printf "%s[ERROR] Usage: /session conv clear [sess] [conv]. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv clear [sess] [conv]."; return 1
     fi
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     if [[ -z "$name" ]]; then
-        printf "%s[ERROR] No current conversation. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current conversation."; return 1
     fi
     MSGS["${sess}|${name}"]="[]"
     if [[ "$sess" == "$CUR_SESSION_NAME" && "$name" == "$CUR_CONV_NAME" ]]; then
         CONVERSATION=()
     fi
-    printf "%s[INFO] Cleared messages of conversation '%s' in session '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "${COLOR_RESET}"
+    br_log_info "Cleared messages of conversation '%s' in session '%s'." "$name" "$sess"
 }
 
 br_conv_save() {
     local sess="$CUR_SESSION_NAME"
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     if [[ $# -eq 1 ]]; then
         local file="$1"
         br_sync_msgs
         br_dump_session_json "$sess" | jq . > "$file"
-        printf "%s[INFO] Saved all conversations of session '%s' to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$sess" "$file" "${COLOR_RESET}"
+        br_log_info "Saved all conversations of session '%s' to '%s'." "$sess" "$file"
     elif [[ $# -eq 2 ]]; then
         local name file="$2"
-        name=$(get_conv_name "$sess" "$1") || { printf "%s[ERROR] Conversation '%s' does not exist. [/ERROR]%s\n" "${COLOR_DIM}" "$1" "${COLOR_RESET}"; return 1; }
+        name=$(get_conv_name "$sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
         br_sync_msgs
         local key="${sess}|${name}"
         jq -n --arg name "$name" --arg id "${CONVS[$key]}" --argjson msgs "${MSGS[$key]:-[]}" \
             '{name: $name, id: $id, messages: $msgs}' | jq . > "$file"
-        printf "%s[INFO] Saved conversation '%s' (session '%s') to '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "$file" "${COLOR_RESET}"
+        br_log_info "Saved conversation '%s' (session '%s') to '%s'." "$name" "$sess" "$file"
     else
-        printf "%s[ERROR] Usage: /session conv save <file> | <conv> <file>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv save <file> | <conv> <file>."; return 1
     fi
 }
 
 br_conv_load() {
     local sess="$CUR_SESSION_NAME"
     if [[ -z "$sess" ]]; then
-        printf "%s[ERROR] No current session. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "No current session."; return 1
     fi
     if [[ $# -eq 1 ]]; then
         local file="$1"
-        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        [[ ! -f "$file" ]] && { br_log_error "File not found: %s." "$file"; return 1; }
         br_sync_msgs
         local data=$(cat "$file")
         local count=0
@@ -1020,15 +1041,15 @@ br_conv_load() {
             MSGS["${sess}|${cname}"]=$(printf '%s' "$data" | jq -c '.messages')
             count=1
         else
-            printf "%s[ERROR] Unrecognized file format. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+            br_log_error "Unrecognized file format."; return 1
         fi
         br_sync_msgs; br_load_msgs; br_update_headers
-        printf "%s[INFO] Loaded %d conversation(s) into session '%s' from '%s'. Same-name convs replaced. [/INFO]%s\n" "${COLOR_DIM}" "$count" "$sess" "$file" "${COLOR_RESET}"
+        br_log_info "Loaded %d conversation(s) into session '%s' from '%s'. Same-name convs replaced." "$count" "$sess" "$file"
     elif [[ $# -eq 2 ]]; then
         local file="$1" name="$2"
-        [[ ! -f "$file" ]] && { printf "%s[ERROR] File not found: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$file" "${COLOR_RESET}"; return 1; }
+        [[ ! -f "$file" ]] && { br_log_error "File not found: %s." "$file"; return 1; }
         if ! is_valid_name "$name"; then
-            printf "%s[ERROR] Invalid conv name. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+            br_log_error "Invalid conv name."; return 1
         fi
         local data=$(cat "$file")
         local cid cmsgs
@@ -1041,15 +1062,15 @@ br_conv_load() {
                 cid=$(printf '%s' "$data" | jq -r ".conversations[0].id")
                 cmsgs=$(printf '%s' "$data" | jq -c ".conversations[0].messages")
             else
-                printf "%s[ERROR] No conversations in file. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+                br_log_error "No conversations in file."; return 1
             fi
         fi
         CONVS["${sess}|${name}"]="$cid"
         MSGS["${sess}|${name}"]="$cmsgs"
         br_sync_msgs; br_load_msgs; br_update_headers
-        printf "%s[INFO] Loaded conversation into '%s' (session '%s') from '%s'. [/INFO]%s\n" "${COLOR_DIM}" "$name" "$sess" "$file" "${COLOR_RESET}"
+        br_log_info "Loaded conversation into '%s' (session '%s') from '%s'." "$name" "$sess" "$file"
     else
-        printf "%s[ERROR] Usage: /session conv load <file> | <file> <conv>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; return 1
+        br_log_error "Usage: /session conv load <file> | <file> <conv>."; return 1
     fi
 }
 
@@ -1067,8 +1088,8 @@ br_handle_session_conv() {
         save)   br_conv_save "$@" ;;
         load)   br_conv_load "$@" ;;
         clear)  br_conv_clear "$@" ;;
-        "")     printf "%s[INFO] Usage: /session conv <ls|new|rm|mv|cp|resume|save|load|clear> ... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}" ;;
-        *)      printf "%s[ERROR] Unknown /session conv sub-command: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$sub" "${COLOR_RESET}" ;;
+        "")     br_log_info "Usage: /session conv <ls|new|rm|mv|cp|resume|save|load|clear> ..." ;;
+        *)      br_log_error "Unknown /session conv sub-command: %s." "$sub" ;;
     esac
 }
 
@@ -1086,8 +1107,8 @@ br_handle_session() {
         save)   br_session_save "$@" ;;
         load)   br_session_load "$@" ;;
         conv)   br_handle_session_conv "$@" ;;
-        "")     printf "%s[INFO] Usage: /session <ls|new|clear|mv|cp|rm|dump|resume|save|load|conv> ... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}" ;;
-        *)      printf "%s[ERROR] Unknown /session sub-command: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$sub" "${COLOR_RESET}" ;;
+        "")     br_log_info "Usage: /session <ls|new|clear|mv|cp|rm|dump|resume|save|load|conv> ..." ;;
+        *)      br_log_error "Unknown /session sub-command: %s." "$sub" ;;
     esac
 }
 
@@ -1102,24 +1123,24 @@ br_handle_conv() {
             else br_conv_rm "$CUR_SESSION_NAME" "$1"; fi ;;
         mv)
             if [[ $# -eq 1 || $# -eq 2 ]]; then br_conv_mv "$@"
-            else printf "%s[ERROR] Usage: /conv mv <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; fi ;;
+            else br_log_error "Usage: /conv mv <new> | <old> <new>."; fi ;;
         cp)
             if [[ $# -eq 1 || $# -eq 2 ]]; then br_conv_cp "$@"
-            else printf "%s[ERROR] Usage: /conv cp <new> | <old> <new>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; fi ;;
+            else br_log_error "Usage: /conv cp <new> | <old> <new>."; fi ;;
         resume)
             if [[ $# -eq 1 ]]; then br_conv_resume "$CUR_SESSION_NAME" "$1"
-            else printf "%s[ERROR] Usage: /conv resume <name>. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"; fi ;;
+            else br_log_error "Usage: /conv resume <name>."; fi ;;
         save)   br_conv_save "$@" ;;
         load)   br_conv_load "$@" ;;
         clear)
             if [[ $# -eq 0 ]]; then br_conv_clear
             else br_conv_clear "$CUR_SESSION_NAME" "$1"; fi ;;
-        "")     printf "%s[INFO] Usage: /conv <ls|new|rm|mv|cp|resume|save|load|clear> ... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}" ;;
-        *)      printf "%s[ERROR] Unknown /conv sub-command: %s. [/ERROR]%s\n" "${COLOR_DIM}" "$sub" "${COLOR_RESET}" ;;
+        "")     br_log_info "Usage: /conv <ls|new|rm|mv|cp|resume|save|load|clear> ..." ;;
+        *)      br_log_error "Unknown /conv sub-command: %s." "$sub" ;;
     esac
 }
 
-# Tool implementations (unchanged)
+# Tool implementations
 
 read_file() {
     local args_json="$1"
@@ -1389,7 +1410,7 @@ execute_tool() {
 # Compact the conversation history
 compact_conversation() {
     if [[ ${#CONVERSATION[@]} -eq 0 ]]; then
-        printf "%s[INFO] Conversation is empty, nothing to compact. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        br_log_info "Conversation is empty, nothing to compact."
         return 0
     fi
     local conversation_text="" found=0
@@ -1402,7 +1423,7 @@ compact_conversation() {
         fi
     done
     if [[ "$found" -eq 0 ]]; then
-        printf "%s[INFO] No user/assistant messages to compact. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        br_log_info "No user/assistant messages to compact."
         return 0
     fi
     local summary_prompt
@@ -1423,7 +1444,7 @@ Summary:"
     curl_args+=("-H" "X-Session-Affinity: $SESSION_AFFINITY")
     curl_args+=("-H" "X-Conversation-Id: $CONVERSATION_ID")
     if [[ -n "$BR_API_KEY" ]]; then curl_args+=("-H" "Authorization: Bearer $BR_API_KEY"); fi
-    printf "%s[INFO] Compacting conversation... [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+    br_log_info "Compacting conversation..."
     local response
     response=$(curl -s --max-time "$BR_TIMEOUT" "$BR_BASE_URL/chat/completions" "${curl_args[@]}" -d "$request_body")
     if [[ -z "$response" ]]; then echo "Error: Empty response from LLM server during compaction."; return 1; fi
@@ -1445,7 +1466,7 @@ Summary:"
     summary_assistant_msg=$(printf '%s' "$assistant_content" | jq -Rs --arg rc "$reasoning_text" '{role: "assistant", reasoning_content: $rc, content: .}')
     CONVERSATION=("$summary_user_msg" "$summary_assistant_msg")
     br_sync_msgs
-    printf "%s[INFO] Conversation compacted. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+    br_log_info "Conversation compacted."
     printf "%sSummary:%s %s\n\n" "${COLOR_DIM}" "${COLOR_RESET}" "$summary"
 }
 
@@ -1470,7 +1491,7 @@ oai_make_request() {
     # Ensure valid session/conversation before sending
     br_update_headers
     if [[ -z "$SESSION_AFFINITY" || -z "$CONVERSATION_ID" ]]; then
-        printf "%s[ERROR] No active session/conversation. Use /session conv new or /session conv resume. [/ERROR]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+        br_log_error "No active session/conversation. Use /session conv new or /session conv resume."
         return 1
     fi
 
@@ -1723,7 +1744,7 @@ oai_make_request() {
                 printf "%s[TOOL_CALL]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf '%s' "$tc_json" | jq $JQ_COLOR_FLAG .
                 printf "%s[/TOOL_CALL]%s\n\n" "${COLOR_DIM}" "${COLOR_RESET}"
-                printf "%s[INFO] Executing tool '%s'... [/INFO]%s\n" "${COLOR_DIM}" "$func_name" "${COLOR_RESET}"
+                br_log_info "Executing tool '%s'..." "$func_name"
                 printf "%s[TOOL_RESPONSE]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
                 printf "%s" "${COLOR_DIM}"
                 local tool_output tool_exit=0
@@ -1802,7 +1823,7 @@ main() {
     init_conversation
     init_input_history
 
-    printf "%s[INFO] CTRL+C clears input, CTRL+D exits, UP/DOWN navigates history. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+    br_log_info "CTRL+C clears input, CTRL+D exits, UP/DOWN navigates history."
 
     while true; do
         echo
@@ -1816,7 +1837,8 @@ main() {
 
         # CTRL+D (EOF) exits
         if [ "$status" -ne 0 ]; then
-            printf "\n%s[INFO] EOF received. Exiting. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+            echo
+            br_log_info "EOF received. Exiting."
             break
         fi
 
@@ -1829,7 +1851,7 @@ main() {
 
         # Exit
         if [[ "$message" == "/exit" || "$message" == "/quit" ]]; then
-            printf "%s[INFO] Exiting. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+            br_log_info "Exiting."
             break
         fi
 
@@ -1937,9 +1959,9 @@ EOF
                 echo "${COLOR_DIM}[/MESSAGE]${COLOR_RESET}"
                 unset 'CONVERSATION[-1]'
                 br_sync_msgs
-                printf "%s[INFO] Popped last message from conversation. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                br_log_info "Popped last message from conversation."
             else
-                printf "%s[INFO] Conversation is empty. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+                br_log_info "Conversation is empty."
             fi
             continue
         fi
@@ -1959,7 +1981,7 @@ EOF
         fi
         if [[ "$message" == "/history clear" ]]; then
             history -c 2>/dev/null; : > "$BR_HIST_FILE" 2>/dev/null
-            printf "%s[INFO] Input history cleared. [/INFO]%s\n" "${COLOR_DIM}" "${COLOR_RESET}"
+            br_log_info "Input history cleared."
             continue
         fi
 
