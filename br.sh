@@ -50,10 +50,12 @@ fi
 # Color setup
 if [[ "$USE_COLOR" == "true" ]]; then
     COLOR_DIM=$'\033[90m'
+    COLOR_GREEN=$'\033[32m'
     COLOR_RESET=$'\033[0m'
     JQ_COLOR_FLAG="-C"
 else
     COLOR_DIM=""
+    COLOR_GREEN=""
     COLOR_RESET=""
     JQ_COLOR_FLAG=""
 fi
@@ -122,6 +124,8 @@ export BR_RETRIES="${BR_RETRIES:-100}"
 declare -A SESSIONS    # SESSIONS[name]=session_uuid
 declare -A CONVS       # CONVS["session|conv"]=conv_uuid
 declare -A MSGS        # MSGS["session|conv"]="[json array of messages]"
+declare -A SESSION_DTS # SESSION_DTS[name]=creation_datetime_utc
+declare -A CONV_DTS    # CONV_DTS["session|conv"]=creation_datetime_utc
 
 CUR_SESSION_NAME=""
 CUR_CONV_NAME=""
@@ -140,6 +144,11 @@ GLOBAL_RETRY_DELAY=2
 # Generate lowercase UUID
 gen_uuid() {
     uuidgen | tr '[:upper:]' '[:lower:]'
+}
+
+# Get current UTC datetime in ISO 8601 format
+get_utc_datetime() {
+    date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
 # Print configuration and session headers
@@ -465,17 +474,19 @@ br_info() {
     print_config_and_headers
     echo "Session:"
     if [[ -n "$CUR_SESSION_NAME" ]] && [[ -n "${SESSIONS[$CUR_SESSION_NAME]+x}" ]]; then
-        echo "  Name: $CUR_SESSION_NAME"
-        echo "  ID  : ${SESSIONS[$CUR_SESSION_NAME]}"
-        echo "  Convs: $(count_convs_in_session "$CUR_SESSION_NAME")"
+        echo "  Name    : $CUR_SESSION_NAME"
+        echo "  ID      : ${SESSIONS[$CUR_SESSION_NAME]}"
+        echo "  DateTime: ${SESSION_DTS[$CUR_SESSION_NAME]:-N/A}"
+        echo "  Convs   : $(count_convs_in_session "$CUR_SESSION_NAME")"
     else
         echo "  (no current session)"
     fi
     echo "Conversation:"
     if [[ -n "$CUR_CONV_NAME" ]] && [[ -n "${CONVS["$CUR_SESSION_NAME|$CUR_CONV_NAME"]+x}" ]]; then
-        echo "  Name: $CUR_CONV_NAME"
-        echo "  ID  : ${CONVS[${CUR_SESSION_NAME}|${CUR_CONV_NAME}]}"
-        echo "  Msgs: $(count_msgs_in_conv "$CUR_SESSION_NAME" "$CUR_CONV_NAME")"
+        echo "  Name    : $CUR_CONV_NAME"
+        echo "  ID      : ${CONVS[${CUR_SESSION_NAME}|${CUR_CONV_NAME}]}"
+        echo "  DateTime: ${CONV_DTS[${CUR_SESSION_NAME}|${CUR_CONV_NAME}]:-N/A}"
+        echo "  Msgs    : $(count_msgs_in_conv "$CUR_SESSION_NAME" "$CUR_CONV_NAME")"
     else
         echo "  (no current conversation)"
     fi
@@ -489,11 +500,17 @@ br_session_ls() {
         br_log_info "No sessions."
         return 0
     fi
-    printf "%s%-40s %-40s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "CONVS" "${COLOR_RESET}"
+    printf "%s%-21s %-37s %-21s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "DATETIME" "CONVS" "${COLOR_RESET}"
     for name in "${!SESSIONS[@]}"; do
         local marker=" "
         [[ "$name" == "$CUR_SESSION_NAME" ]] && marker="*"
-        printf "%s %-39s %-40s %-6s\n" "$marker" "$name" "${SESSIONS[$name]}" "$(count_convs_in_session "$name")"
+        local row
+        printf -v row "%s %-19s %-37s %-21s %-6s" "$marker" "$name" "${SESSIONS[$name]}" "${SESSION_DTS[$name]:-N/A}" "$(count_convs_in_session "$name")"
+        if [[ "$USE_COLOR" == "true" && "$name" == "$CUR_SESSION_NAME" ]]; then
+            printf "%s%s%s\n" "$COLOR_GREEN" "$row" "$COLOR_RESET"
+        else
+            printf "%s\n" "$row"
+        fi
     done
 }
 
@@ -511,6 +528,7 @@ br_session_new() {
     fi
     br_sync_msgs
     SESSIONS[$name]="$id"
+    SESSION_DTS[$name]=$(get_utc_datetime)
     CUR_SESSION_NAME="$name"
     CUR_CONV_NAME=""
     CONVERSATION=()
@@ -535,6 +553,7 @@ br_session_clear() {
     for key in "${to_remove[@]}"; do
         unset "CONVS[$key]"
         unset "MSGS[$key]"
+        unset "CONV_DTS[$key]"
     done
     if [[ "$sess" == "$CUR_SESSION_NAME" ]]; then
         CUR_CONV_NAME=""
@@ -567,7 +586,9 @@ br_session_mv() {
     fi
     br_sync_msgs
     SESSIONS[$new]="${SESSIONS[$old]}"
+    SESSION_DTS[$new]="${SESSION_DTS[$old]}"
     unset "SESSIONS[$old]"
+    unset "SESSION_DTS[$old]"
     # Move conv entries
     local -a keys_to_move=()
     for key in "${!CONVS[@]}"; do
@@ -578,8 +599,10 @@ br_session_mv() {
         local new_key="${new}|${conv}"
         CONVS[$new_key]="${CONVS[$key]}"
         MSGS[$new_key]="${MSGS[$key]}"
+        CONV_DTS[$new_key]="${CONV_DTS[$key]}"
         unset "CONVS[$key]"
         unset "MSGS[$key]"
+        unset "CONV_DTS[$key]"
     done
     if [[ "$old" == "$CUR_SESSION_NAME" ]]; then
         CUR_SESSION_NAME="$new"
@@ -610,6 +633,7 @@ br_session_cp() {
     br_sync_msgs
     local new_id=$(gen_uuid)
     SESSIONS[$new]="$new_id"
+    SESSION_DTS[$new]=$(get_utc_datetime)
     for key in "${!CONVS[@]}"; do
         if [[ "$key" == "${old}|"* ]]; then
             local conv="${key#${old}|}"
@@ -617,6 +641,7 @@ br_session_cp() {
             local new_conv_id=$(gen_uuid)
             CONVS[$new_key]="$new_conv_id"
             MSGS[$new_key]="${MSGS[$key]}"
+            CONV_DTS[$new_key]=$(get_utc_datetime)
         fi
     done
     br_update_headers
@@ -635,6 +660,7 @@ br_session_rm() {
     fi
     br_sync_msgs
     unset "SESSIONS[$name]"
+    unset "SESSION_DTS[$name]"
     local -a to_remove=()
     for key in "${!CONVS[@]}"; do
         [[ "$key" == "${name}|"* ]] && to_remove+=("$key")
@@ -642,6 +668,7 @@ br_session_rm() {
     for key in "${to_remove[@]}"; do
         unset "CONVS[$key]"
         unset "MSGS[$key]"
+        unset "CONV_DTS[$key]"
     done
     if [[ "$name" == "$CUR_SESSION_NAME" ]]; then
         CUR_SESSION_NAME=""
@@ -655,10 +682,11 @@ br_session_rm() {
     fi
 }
 
-# Serialize single session to JSON
+# Serialize single session to JSON (includes datetime)
 br_dump_session_json() {
     local name="$1"
     local id="${SESSIONS[$name]}"
+    local dt="${SESSION_DTS[$name]:-}"
     local convs_json="[]"
     for key in "${!CONVS[@]}"; do
         if [[ "$key" == "${name}|"* ]]; then
@@ -667,13 +695,14 @@ br_dump_session_json() {
             conv_obj=$(jq -n \
                 --arg name "$conv" \
                 --arg id "${CONVS[$key]}" \
+                --arg dt "${CONV_DTS[$key]:-}" \
                 --argjson msgs "${MSGS[$key]:-[]}" \
-                '{name: $name, id: $id, messages: $msgs}')
+                '{name: $name, id: $id, datetime: $dt, messages: $msgs}')
             convs_json=$(printf '%s\n%s' "$convs_json" "$conv_obj" | jq -s '.')
         fi
     done
-    jq -n --arg name "$name" --arg id "$id" --argjson convs "$convs_json" \
-        '{name: $name, id: $id, conversations: $convs}'
+    jq -n --arg name "$name" --arg id "$id" --arg dt "$dt" --argjson convs "$convs_json" \
+        '{name: $name, id: $id, datetime: $dt, conversations: $convs}'
 }
 
 br_session_dump() {
@@ -688,6 +717,76 @@ br_session_dump() {
     fi
     br_sync_msgs
     br_dump_session_json "$name" | jq $JQ_COLOR_FLAG .
+}
+
+# Print sessions and conversations as an ASCII tree
+br_session_tree() {
+    if [[ ${#SESSIONS[@]} -eq 0 ]]; then
+        br_log_info "No sessions."
+        return 0
+    fi
+    # Get sorted session names for deterministic output
+    local -a sess_names
+    mapfile -t sess_names < <(printf '%s\n' "${!SESSIONS[@]}" | sort)
+
+    local stotal=${#sess_names[@]}
+    local si=0
+    for sname in "${sess_names[@]}"; do
+        ((si++))
+        local is_last_s=$(( si == stotal ))
+
+        # Tree prefix for session (top level)
+        local s_prefix s_child_prefix
+        if [[ "$is_last_s" == "1" ]]; then
+            s_prefix="└── "
+            s_child_prefix="    "
+        else
+            s_prefix="├── "
+            s_child_prefix="│   "
+        fi
+
+        # Session marker: * for current, empty otherwise
+        local s_marker=""
+        [[ "$sname" == "$CUR_SESSION_NAME" ]] && s_marker="* "
+
+        local s_line="${s_prefix}${s_marker}id=${SESSIONS[$sname]} name=\"${sname}\" datetime=\"${SESSION_DTS[$sname]:-N/A}\""
+
+        if [[ "$USE_COLOR" == "true" && "$sname" == "$CUR_SESSION_NAME" ]]; then
+            printf "%s%s%s\n" "$COLOR_GREEN" "$s_line" "$COLOR_RESET"
+        else
+            printf "%s\n" "$s_line"
+        fi
+
+        # Get sorted conversation names in this session
+        local -a conv_names
+        mapfile -t conv_names < <(for key in "${!CONVS[@]}"; do [[ "$key" == "${sname}|"* ]] && echo "${key#${sname}|}"; done | sort)
+
+        local ctotal=${#conv_names[@]}
+        local ci=0
+        for cname in "${conv_names[@]}"; do
+            ((ci++))
+            local is_last_c=$(( ci == ctotal ))
+
+            local c_prefix
+            if [[ "$is_last_c" == "1" ]]; then
+                c_prefix="${s_child_prefix}└── "
+            else
+                c_prefix="${s_child_prefix}├── "
+            fi
+
+            local c_marker=""
+            [[ "$sname" == "$CUR_SESSION_NAME" && "$cname" == "$CUR_CONV_NAME" ]] && c_marker="* "
+
+            local c_key="${sname}|${cname}"
+            local c_line="${c_prefix}${c_marker}id=${CONVS[$c_key]} name=\"${cname}\" datetime=\"${CONV_DTS[$c_key]:-N/A}\""
+
+            if [[ "$USE_COLOR" == "true" && "$sname" == "$CUR_SESSION_NAME" && "$cname" == "$CUR_CONV_NAME" ]]; then
+                printf "%s%s%s\n" "$COLOR_GREEN" "$c_line" "$COLOR_RESET"
+            else
+                printf "%s\n" "$c_line"
+            fi
+        done
+    done
 }
 
 br_session_resume() {
@@ -737,15 +836,19 @@ br_session_load() {
         for ((i=0; i<n; i++)); do
             local sname=$(printf '%s' "$data" | jq -r ".sessions[$i].name")
             local sid=$(printf '%s' "$data" | jq -r ".sessions[$i].id")
+            local sdt=$(printf '%s' "$data" | jq -r ".sessions[$i].datetime // empty")
             SESSIONS[$sname]="$sid"
+            SESSION_DTS[$sname]="${sdt:-$(get_utc_datetime)}"
             local cn=$(printf '%s' "$data" | jq ".sessions[$i].conversations | length")
             for ((j=0; j<cn; j++)); do
                 local cname=$(printf '%s' "$data" | jq -r ".sessions[$i].conversations[$j].name")
                 local cid=$(printf '%s' "$data" | jq -r ".sessions[$i].conversations[$j].id")
+                local cdt=$(printf '%s' "$data" | jq -r ".sessions[$i].conversations[$j].datetime // empty")
                 local cmsgs=$(printf '%s' "$data" | jq -c ".sessions[$i].conversations[$j].messages")
                 local key="${sname}|${cname}"
                 CONVS[$key]="$cid"
                 MSGS[$key]="$cmsgs"
+                CONV_DTS[$key]="${cdt:-$(get_utc_datetime)}"
             done
             ((count++))
         done
@@ -766,21 +869,25 @@ br_session_load() {
             sjson=$(printf '%s' "$data" | jq -c '.')
         fi
         SESSIONS[$name]=$(printf '%s' "$sjson" | jq -r '.id')
+        local sdt=$(printf '%s' "$sjson" | jq -r '.datetime // empty')
+        SESSION_DTS[$name]="${sdt:-$(get_utc_datetime)}"
         # Remove existing convs for this session
         local -a to_remove=()
         for key in "${!CONVS[@]}"; do
             [[ "$key" == "${name}|"* ]] && to_remove+=("$key")
         done
         for key in "${to_remove[@]}"; do
-            unset "CONVS[$key]"; unset "MSGS[$key]"
+            unset "CONVS[$key]"; unset "MSGS[$key]"; unset "CONV_DTS[$key]"
         done
         local cn=$(printf '%s' "$sjson" | jq '.conversations | length')
         for ((j=0; j<cn; j++)); do
             local cname=$(printf '%s' "$sjson" | jq -r ".conversations[$j].name")
             local cid=$(printf '%s' "$sjson" | jq -r ".conversations[$j].id")
+            local cdt=$(printf '%s' "$sjson" | jq -r ".conversations[$j].datetime // empty")
             local cmsgs=$(printf '%s' "$sjson" | jq -c ".conversations[$j].messages")
             local key="${name}|${cname}"
             CONVS[$key]="$cid"; MSGS[$key]="$cmsgs"
+            CONV_DTS[$key]="${cdt:-$(get_utc_datetime)}"
         done
         br_sync_msgs; br_load_msgs; br_update_headers
         br_log_info "Loaded session into '%s' from '%s'." "$name" "$file"
@@ -809,11 +916,18 @@ br_conv_ls() {
         br_log_info "No conversations in session '%s'." "$sess"
         return 0
     fi
-    printf "%s%-40s %-40s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "MSGS" "${COLOR_RESET}"
+    printf "%s%-21s %-37s %-21s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "DATETIME" "MSGS" "${COLOR_RESET}"
     for conv in "${convs_in_sess[@]}"; do
         local marker=" "
         [[ "$sess" == "$CUR_SESSION_NAME" && "$conv" == "$CUR_CONV_NAME" ]] && marker="*"
-        printf "%s %-39s %-40s %-6s\n" "$marker" "$conv" "${CONVS[${sess}|${conv}]}" "$(count_msgs_in_conv "$sess" "$conv")"
+        local ckey="${sess}|${conv}"
+        local row
+        printf -v row "%s %-19s %-37s %-21s %-6s" "$marker" "$conv" "${CONVS[$ckey]}" "${CONV_DTS[$ckey]:-N/A}" "$(count_msgs_in_conv "$sess" "$conv")"
+        if [[ "$USE_COLOR" == "true" && "$sess" == "$CUR_SESSION_NAME" && "$conv" == "$CUR_CONV_NAME" ]]; then
+            printf "%s%s%s\n" "$COLOR_GREEN" "$row" "$COLOR_RESET"
+        else
+            printf "%s\n" "$row"
+        fi
     done
 }
 
@@ -842,6 +956,7 @@ br_conv_new() {
     local key="${sess}|${name}"
     CONVS[$key]="$id"
     MSGS[$key]="[]"
+    CONV_DTS[$key]=$(get_utc_datetime)
     CUR_SESSION_NAME="$sess"
     CUR_CONV_NAME="$name"
     CONVERSATION=()
@@ -869,7 +984,7 @@ br_conv_rm() {
     fi
     br_sync_msgs
     local key="${sess}|${name}"
-    unset "CONVS[$key]"; unset "MSGS[$key]"
+    unset "CONVS[$key]"; unset "MSGS[$key]"; unset "CONV_DTS[$key]"
     if [[ "$sess" == "$CUR_SESSION_NAME" && "$name" == "$CUR_CONV_NAME" ]]; then
         CUR_CONV_NAME=""
         CONVERSATION=()
@@ -910,7 +1025,8 @@ br_conv_mv() {
     local dst_key="${dst_sess}|${dst_conv}"
     CONVS[$dst_key]="${CONVS[$src_key]}"
     MSGS[$dst_key]="${MSGS[$src_key]}"
-    unset "CONVS[$src_key]"; unset "MSGS[$src_key]"
+    CONV_DTS[$dst_key]="${CONV_DTS[$src_key]}"
+    unset "CONVS[$src_key]"; unset "MSGS[$src_key]"; unset "CONV_DTS[$src_key]"
     if [[ "$src_sess" == "$CUR_SESSION_NAME" && "$src_conv" == "$CUR_CONV_NAME" ]]; then
         CUR_SESSION_NAME="$dst_sess"; CUR_CONV_NAME="$dst_conv"
         br_load_msgs
@@ -949,6 +1065,7 @@ br_conv_cp() {
     local dst_key="${dst_sess}|${dst_conv}"
     CONVS[$dst_key]=$(gen_uuid)
     MSGS[$dst_key]="${MSGS[$src_key]}"
+    CONV_DTS[$dst_key]=$(get_utc_datetime)
     br_update_headers
     br_log_info "Copied conversation '%s' (session '%s') -> '%s' (session '%s')." "$src_conv" "$src_sess" "$dst_conv" "$dst_sess"
 }
@@ -1013,8 +1130,8 @@ br_conv_save() {
         name=$(get_conv_name "$sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
         br_sync_msgs
         local key="${sess}|${name}"
-        jq -n --arg name "$name" --arg id "${CONVS[$key]}" --argjson msgs "${MSGS[$key]:-[]}" \
-            '{name: $name, id: $id, messages: $msgs}' | jq . > "$file"
+        jq -n --arg name "$name" --arg id "${CONVS[$key]}" --arg dt "${CONV_DTS[$key]:-}" --argjson msgs "${MSGS[$key]:-[]}" \
+            '{name: $name, id: $id, datetime: $dt, messages: $msgs}' | jq . > "$file"
         br_log_info "Saved conversation '%s' (session '%s') to '%s'." "$name" "$sess" "$file"
     else
         br_log_error "Usage: /session conv save <file> | <conv> <file>."; return 1
@@ -1037,15 +1154,19 @@ br_conv_load() {
             for ((j=0; j<n; j++)); do
                 local cname=$(printf '%s' "$data" | jq -r ".conversations[$j].name")
                 local cid=$(printf '%s' "$data" | jq -r ".conversations[$j].id")
+                local cdt=$(printf '%s' "$data" | jq -r ".conversations[$j].datetime // empty")
                 local cmsgs=$(printf '%s' "$data" | jq -c ".conversations[$j].messages")
                 CONVS["${sess}|${cname}"]="$cid"
                 MSGS["${sess}|${cname}"]="$cmsgs"
+                CONV_DTS["${sess}|${cname}"]="${cdt:-$(get_utc_datetime)}"
                 ((count++))
             done
         elif [[ "$(printf '%s' "$data" | jq -r 'has("messages")')" == "true" ]]; then
             local cname=$(printf '%s' "$data" | jq -r '.name')
+            local cdt=$(printf '%s' "$data" | jq -r '.datetime // empty')
             CONVS["${sess}|${cname}"]=$(printf '%s' "$data" | jq -r '.id')
             MSGS["${sess}|${cname}"]=$(printf '%s' "$data" | jq -c '.messages')
+            CONV_DTS["${sess}|${cname}"]="${cdt:-$(get_utc_datetime)}"
             count=1
         else
             br_log_error "Unrecognized file format."; return 1
@@ -1059,21 +1180,24 @@ br_conv_load() {
             br_log_error "Invalid conv name."; return 1
         fi
         local data=$(cat "$file")
-        local cid cmsgs
+        local cid cmsgs cdt
         if [[ "$(printf '%s' "$data" | jq -r 'has("messages")')" == "true" ]]; then
             cid=$(printf '%s' "$data" | jq -r '.id')
             cmsgs=$(printf '%s' "$data" | jq -c '.messages')
+            cdt=$(printf '%s' "$data" | jq -r '.datetime // empty')
         else
             local n=$(printf '%s' "$data" | jq '.conversations | length')
             if [[ "$n" -ge 1 ]]; then
                 cid=$(printf '%s' "$data" | jq -r ".conversations[0].id")
                 cmsgs=$(printf '%s' "$data" | jq -c ".conversations[0].messages")
+                cdt=$(printf '%s' "$data" | jq -r ".conversations[0].datetime // empty")
             else
                 br_log_error "No conversations in file."; return 1
             fi
         fi
         CONVS["${sess}|${name}"]="$cid"
         MSGS["${sess}|${name}"]="$cmsgs"
+        CONV_DTS["${sess}|${name}"]="${cdt:-$(get_utc_datetime)}"
         br_sync_msgs; br_load_msgs; br_update_headers
         br_log_info "Loaded conversation into '%s' (session '%s') from '%s'." "$name" "$sess" "$file"
     else
@@ -1110,11 +1234,12 @@ br_handle_session() {
         cp)     br_session_cp "$@" ;;
         rm)     br_session_rm "$@" ;;
         dump)   br_session_dump "$@" ;;
+        tree)   br_session_tree "$@" ;;
         resume) br_session_resume "$@" ;;
         save)   br_session_save "$@" ;;
         load)   br_session_load "$@" ;;
         conv)   br_handle_session_conv "$@" ;;
-        "")     br_log_info "Usage: /session <ls|new|clear|mv|cp|rm|dump|resume|save|load|conv> ..." ;;
+        "")     br_log_info "Usage: /session <ls|new|clear|mv|cp|rm|dump|tree|resume|save|load|conv> ..." ;;
         *)      br_log_error "Unknown /session sub-command: %s." "$sub" ;;
     esac
 }
@@ -1851,9 +1976,13 @@ main() {
     while [[ -n "${SESSIONS[$init_sname]+x}" ]]; do init_sname="${init_sname}_1"; done
     while [[ -n "${CONVS["$init_sname|$init_cname"]+x}" ]]; do init_cname="${init_cname}_1"; done
 
+    local init_dt
+    init_dt=$(get_utc_datetime)
     SESSIONS["$init_sname"]="$init_sid"
+    SESSION_DTS["$init_sname"]="$init_dt"
     CONVS["$init_sname|$init_cname"]="$init_cid"
     MSGS["$init_sname|$init_cname"]="[]"
+    CONV_DTS["$init_sname|$init_cname"]="$init_dt"
 
     CUR_SESSION_NAME="$init_sname"
     CUR_CONV_NAME="$init_cname"
@@ -1925,6 +2054,7 @@ main() {
   /session cp <old> <new>              Copy session <old> (id-or-name) to <new>
   /session rm [id-or-name]             Remove session (current if no name)
   /session dump [id-or-name]           Dump session as pretty JSON
+  /session tree                        Show sessions and conversations as a tree
   /session resume <id-or-name>         Switch to session
   /session save <file>                 Save all sessions to file
   /session save <id-or-name> <file>    Save single session to file

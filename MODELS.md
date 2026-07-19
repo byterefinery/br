@@ -77,7 +77,7 @@ Current version `G1h` of the model has issue with looping, so we await new `G1i`
     -ctk q5_1 -ctv q5_1 \
     --no-mmproj-offload \
     --spec-default \
-    --spec-draft-n-max 3 \
+    --spec-draft-n-max 2 \
     --reasoning on \
     --chat-template-kwargs '{"preserve_thinking": true}' \
     --tools all \
