@@ -127,6 +127,12 @@ declare -A MSGS        # MSGS["session|conv"]="[json array of messages]"
 declare -A SESSION_DTS # SESSION_DTS[name]=creation_datetime_utc
 declare -A CONV_DTS    # CONV_DTS["session|conv"]=creation_datetime_utc
 
+# Stack state (global associative arrays)
+declare -A STACKS       # STACKS[name]=stack_uuid
+declare -A STACK_DTS    # STACK_DTS[name]=creation_datetime_utc
+declare -A STACK_SLICES # STACK_SLICES[name]="[json array of slices]"
+CUR_STACK_NAME=""
+
 CUR_SESSION_NAME=""
 CUR_CONV_NAME=""
 
@@ -405,6 +411,16 @@ get_conv_name() {
     return 1
 }
 
+# Resolve id-or-name to stack name
+get_stack_name() {
+    local arg="$1"
+    if [[ -n "${STACKS[$arg]+x}" ]]; then echo "$arg"; return 0; fi
+    for name in "${!STACKS[@]}"; do
+        if [[ "${STACKS[$name]}" == "$arg" ]]; then echo "$name"; return 0; fi
+    done
+    return 1
+}
+
 count_convs_in_session() {
     local sess="$1" count=0
     for key in "${!CONVS[@]}"; do
@@ -416,6 +432,21 @@ count_convs_in_session() {
 count_msgs_in_conv() {
     local key="$1|$2"
     printf '%s' "${MSGS[$key]:-[]}" | jq 'length'
+}
+
+# Count slices in a stack
+count_slices_in_stack() {
+    local name="$1"
+    printf '%s' "${STACK_SLICES[$name]:-[]}" | jq 'length'
+}
+
+# Check if current stack is valid
+br_check_current_stack() {
+    if [[ -z "$CUR_STACK_NAME" ]] || [[ -z "${STACKS[$CUR_STACK_NAME]+x}" ]]; then
+        br_log_error "No current stack. Operation could not be completed because a stack is required but none is set. Use /stack new or /stack use to create or switch to a stack."
+        return 1
+    fi
+    return 0
 }
 
 # Sync in-memory CONVERSATION array to MSGS for current pointers
@@ -459,11 +490,11 @@ br_update_headers() {
 # Check if current session and conversation are valid
 br_check_current() {
     if [[ -z "$CUR_SESSION_NAME" ]] || [[ -z "${SESSIONS[$CUR_SESSION_NAME]+x}" ]]; then
-        br_log_error "No active session. Use /session new or /session resume."
+        br_log_error "No active session. Use /session new or /session use."
         return 1
     fi
     if [[ -z "$CUR_CONV_NAME" ]] || [[ -z "${CONVS["$CUR_SESSION_NAME|$CUR_CONV_NAME"]+x}" ]]; then
-        br_log_error "No active conversation. Use /session conv new or /session conv resume."
+        br_log_error "No active conversation. Use /session conv new or /session conv use."
         return 1
     fi
     return 0
@@ -490,6 +521,15 @@ br_info() {
     else
         echo "  (no current conversation)"
     fi
+    echo "Stack:"
+    if [[ -n "$CUR_STACK_NAME" ]] && [[ -n "${STACKS[$CUR_STACK_NAME]+x}" ]]; then
+        echo "  Name    : $CUR_STACK_NAME"
+        echo "  ID      : ${STACKS[$CUR_STACK_NAME]}"
+        echo "  DateTime: ${STACK_DTS[$CUR_STACK_NAME]:-N/A}"
+        echo "  Slices  : $(count_slices_in_stack "$CUR_STACK_NAME")"
+    else
+        echo "  (no current stack)"
+    fi
     br_log_info "Type /help to see all commands and examples."
 }
 
@@ -500,6 +540,7 @@ br_session_ls() {
         br_log_info "No sessions."
         return 0
     fi
+    # Print name before id for convenience
     printf "%s%-21s %-37s %-21s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "DATETIME" "CONVS" "${COLOR_RESET}"
     for name in "${!SESSIONS[@]}"; do
         local marker=" "
@@ -675,7 +716,7 @@ br_session_rm() {
         CUR_CONV_NAME=""
         CONVERSATION=()
         br_update_headers
-        br_log_info "Removed current session '%s'. No current session/conversation. Use /session resume or /session new." "$name"
+        br_log_info "Removed current session '%s'. No current session/conversation. Use /session use or /session new." "$name"
     else
         br_update_headers
         br_log_info "Removed session '%s'." "$name"
@@ -716,7 +757,9 @@ br_session_dump() {
         br_log_error "No current session."; return 1
     fi
     br_sync_msgs
+    echo "${COLOR_DIM}[SESSION]${COLOR_RESET}"
     br_dump_session_json "$name" | jq $JQ_COLOR_FLAG .
+    echo "${COLOR_DIM}[/SESSION]${COLOR_RESET}"
 }
 
 # Print sessions and conversations as an ASCII tree
@@ -725,7 +768,6 @@ br_session_tree() {
         br_log_info "No sessions."
         return 0
     fi
-    # Get sorted session names for deterministic output
     local -a sess_names
     mapfile -t sess_names < <(printf '%s\n' "${!SESSIONS[@]}" | sort)
 
@@ -735,7 +777,6 @@ br_session_tree() {
         ((si++))
         local is_last_s=$(( si == stotal ))
 
-        # Tree prefix for session (top level)
         local s_prefix s_child_prefix
         if [[ "$is_last_s" == "1" ]]; then
             s_prefix="└── "
@@ -745,11 +786,11 @@ br_session_tree() {
             s_child_prefix="│   "
         fi
 
-        # Session marker: * for current, empty otherwise
         local s_marker=""
         [[ "$sname" == "$CUR_SESSION_NAME" ]] && s_marker="* "
 
-        local s_line="${s_prefix}${s_marker}id=${SESSIONS[$sname]} name=\"${sname}\" datetime=\"${SESSION_DTS[$sname]:-N/A}\""
+        # Print name before id
+        local s_line="${s_prefix}${s_marker}name=\"${sname}\" id=${SESSIONS[$sname]} datetime=\"${SESSION_DTS[$sname]:-N/A}\""
 
         if [[ "$USE_COLOR" == "true" && "$sname" == "$CUR_SESSION_NAME" ]]; then
             printf "%s%s%s\n" "$COLOR_GREEN" "$s_line" "$COLOR_RESET"
@@ -757,7 +798,6 @@ br_session_tree() {
             printf "%s\n" "$s_line"
         fi
 
-        # Get sorted conversation names in this session
         local -a conv_names
         mapfile -t conv_names < <(for key in "${!CONVS[@]}"; do [[ "$key" == "${sname}|"* ]] && echo "${key#${sname}|}"; done | sort)
 
@@ -778,7 +818,8 @@ br_session_tree() {
             [[ "$sname" == "$CUR_SESSION_NAME" && "$cname" == "$CUR_CONV_NAME" ]] && c_marker="* "
 
             local c_key="${sname}|${cname}"
-            local c_line="${c_prefix}${c_marker}id=${CONVS[$c_key]} name=\"${cname}\" datetime=\"${CONV_DTS[$c_key]:-N/A}\""
+            # Print name before id
+            local c_line="${c_prefix}${c_marker}name=\"${cname}\" id=${CONVS[$c_key]} datetime=\"${CONV_DTS[$c_key]:-N/A}\""
 
             if [[ "$USE_COLOR" == "true" && "$sname" == "$CUR_SESSION_NAME" && "$cname" == "$CUR_CONV_NAME" ]]; then
                 printf "%s%s%s\n" "$COLOR_GREEN" "$c_line" "$COLOR_RESET"
@@ -789,10 +830,10 @@ br_session_tree() {
     done
 }
 
-br_session_resume() {
+br_session_use() {
     local name
     if [[ -z "$1" ]]; then
-        br_log_error "Usage: /session resume <id-or-name>."; return 1
+        br_log_error "Usage: /session use <id-or-name>."; return 1
     fi
     name=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
     br_sync_msgs
@@ -800,7 +841,7 @@ br_session_resume() {
     CUR_CONV_NAME=""
     CONVERSATION=()
     br_update_headers
-    br_log_info "Resumed session '%s'. No current conversation set." "$name"
+    br_log_info "Using session '%s'. No current conversation set." "$name"
 }
 
 br_session_save() {
@@ -916,6 +957,7 @@ br_conv_ls() {
         br_log_info "No conversations in session '%s'." "$sess"
         return 0
     fi
+    # Print name before id for convenience
     printf "%s%-21s %-37s %-21s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "DATETIME" "MSGS" "${COLOR_RESET}"
     for conv in "${convs_in_sess[@]}"; do
         local marker=" "
@@ -1070,7 +1112,7 @@ br_conv_cp() {
     br_log_info "Copied conversation '%s' (session '%s') -> '%s' (session '%s')." "$src_conv" "$src_sess" "$dst_conv" "$dst_sess"
 }
 
-br_conv_resume() {
+br_conv_use() {
     local sess name
     if [[ $# -eq 1 ]]; then
         sess="$CUR_SESSION_NAME"; name=$(get_conv_name "$sess" "$1") || { br_log_error "Conversation '%s' does not exist." "$1"; return 1; }
@@ -1078,7 +1120,7 @@ br_conv_resume() {
         sess=$(get_sess_name "$1") || { br_log_error "Session '%s' does not exist." "$1"; return 1; }
         name=$(get_conv_name "$sess" "$2") || { br_log_error "Conversation '%s' does not exist." "$2"; return 1; }
     else
-        br_log_error "Usage: /session conv resume <conv> | <sess> <conv>."; return 1
+        br_log_error "Usage: /session conv use <conv> | <sess> <conv>."; return 1
     fi
     if [[ -z "$sess" ]]; then
         br_log_error "No current session."; return 1
@@ -1087,7 +1129,7 @@ br_conv_resume() {
     CUR_SESSION_NAME="$sess"; CUR_CONV_NAME="$name"
     br_load_msgs
     br_update_headers
-    br_log_info "Resumed conversation '%s' in session '%s' (%d messages)." "$name" "$sess" "$(count_msgs_in_conv "$sess" "$name")"
+    br_log_info "Using conversation '%s' in session '%s' (%d messages)." "$name" "$sess" "$(count_msgs_in_conv "$sess" "$name")"
 }
 
 br_conv_clear() {
@@ -1205,6 +1247,576 @@ br_conv_load() {
     fi
 }
 
+# Dump current conversation between [CONVERSATION]...[/CONVERSATION] tags
+br_conv_dump() {
+    if ! br_check_current; then return 1; fi
+    local messages_json="[]"
+    if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
+        messages_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
+    fi
+    echo "${COLOR_DIM}[CONVERSATION]${COLOR_RESET}"
+    printf '%s' "$messages_json" | jq $JQ_COLOR_FLAG .
+    echo "${COLOR_DIM}[/CONVERSATION]${COLOR_RESET}"
+}
+
+# Stack commands
+
+br_stack_ls() {
+    if [[ ${#STACKS[@]} -eq 0 ]]; then
+        br_log_info "No stacks."
+        return 0
+    fi
+    # Print name before id for convenience
+    printf "%s%-21s %-37s %-21s %-6s%s\n" "${COLOR_DIM}" "NAME" "ID" "DATETIME" "SLICES" "${COLOR_RESET}"
+    for name in "${!STACKS[@]}"; do
+        local marker=" "
+        [[ "$name" == "$CUR_STACK_NAME" ]] && marker="*"
+        local row
+        printf -v row "%s %-19s %-37s %-21s %-6s" "$marker" "$name" "${STACKS[$name]}" "${STACK_DTS[$name]:-N/A}" "$(count_slices_in_stack "$name")"
+        if [[ "$USE_COLOR" == "true" && "$name" == "$CUR_STACK_NAME" ]]; then
+            printf "%s%s%s\n" "$COLOR_GREEN" "$row" "$COLOR_RESET"
+        else
+            printf "%s\n" "$row"
+        fi
+    done
+}
+
+br_stack_new() {
+    local name id
+    id=$(gen_uuid)
+    name="${1:-${id: -12}}"
+    if ! is_valid_name "$name"; then
+        br_log_error "Invalid stack name (no spaces or '|')."
+        return 1
+    fi
+    if [[ -n "${STACKS[$name]+x}" ]]; then
+        br_log_error "Stack '%s' already exists." "$name"
+        return 1
+    fi
+    STACKS[$name]="$id"
+    STACK_DTS[$name]=$(get_utc_datetime)
+    STACK_SLICES[$name]="[]"
+    CUR_STACK_NAME="$name"
+    br_log_info "Created and switched to stack '%s' (id: %s)." "$name" "$id"
+}
+
+# Clear stack: default to "main" if no name given, stay in current stack
+br_stack_clear() {
+    local name
+    if [[ -z "$1" ]]; then
+        name="main"
+    else
+        name=$(get_stack_name "$1") || { br_log_error "Stack '%s' does not exist." "$1"; return 1; }
+    fi
+    if [[ -z "${STACKS[$name]+x}" ]]; then
+        br_log_error "Stack '%s' does not exist." "$name"
+        return 1
+    fi
+    STACK_SLICES[$name]="[]"
+    br_log_info "Cleared all slices in stack '%s'." "$name"
+}
+
+# Rename stack: warn if renaming "main" since it no longer exists
+br_stack_mv() {
+    local old new
+    if [[ $# -eq 2 ]]; then
+        old=$(get_stack_name "$1") || { br_log_error "Stack '%s' does not exist." "$1"; return 1; }
+        new="$2"
+    else
+        br_log_error "Usage: /stack mv <old> <new>."; return 1
+    fi
+    if [[ -n "${STACKS[$new]+x}" ]]; then
+        br_log_error "Stack '%s' already exists." "$new"
+        return 1
+    fi
+    if ! is_valid_name "$new"; then
+        br_log_error "Invalid stack name."
+        return 1
+    fi
+    STACKS[$new]="${STACKS[$old]}"
+    STACK_DTS[$new]="${STACK_DTS[$old]}"
+    STACK_SLICES[$new]="${STACK_SLICES[$old]}"
+    unset "STACKS[$old]"
+    unset "STACK_DTS[$old]"
+    unset "STACK_SLICES[$old]"
+    # Follow rename if current stack was renamed
+    if [[ "$old" == "$CUR_STACK_NAME" ]]; then
+        CUR_STACK_NAME="$new"
+    fi
+    br_log_info "Renamed stack '%s' -> '%s'." "$old" "$new"
+    if [[ "$old" == "main" ]]; then
+        br_log_info "Warning: 'main' stack no longer exists. Issues may occur if not created again."
+    fi
+}
+
+# Copy stack: keep all content intact in source
+br_stack_cp() {
+    local old new
+    if [[ $# -eq 2 ]]; then
+        old=$(get_stack_name "$1") || { br_log_error "Stack '%s' does not exist." "$1"; return 1; }
+        new="$2"
+    else
+        br_log_error "Usage: /stack cp <old> <new>."; return 1
+    fi
+    if [[ -n "${STACKS[$new]+x}" ]]; then
+        br_log_error "Stack '%s' already exists." "$new"
+        return 1
+    fi
+    if ! is_valid_name "$new"; then
+        br_log_error "Invalid stack name."
+        return 1
+    fi
+    local new_id
+    new_id=$(gen_uuid)
+    STACKS[$new]="$new_id"
+    STACK_DTS[$new]=$(get_utc_datetime)
+    STACK_SLICES[$new]="${STACK_SLICES[$old]}"
+    br_log_info "Copied stack '%s' -> '%s'." "$old" "$new"
+}
+
+br_stack_use() {
+    local name
+    if [[ -z "$1" ]]; then
+        br_log_error "Usage: /stack use <id-or-name>."; return 1
+    fi
+    name=$(get_stack_name "$1") || { br_log_error "Stack '%s' does not exist." "$1"; return 1; }
+    CUR_STACK_NAME="$name"
+    br_log_info "Switched to stack '%s'." "$name"
+}
+
+# Remove stack: warn if removing current stack
+br_stack_rm() {
+    local name
+    if [[ -z "$1" ]]; then
+        name="$CUR_STACK_NAME"
+    else
+        name=$(get_stack_name "$1") || { br_log_error "Stack '%s' does not exist." "$1"; return 1; }
+    fi
+    if [[ -z "$name" ]]; then
+        br_log_error "No current stack."; return 1
+    fi
+    unset "STACKS[$name]"
+    unset "STACK_DTS[$name]"
+    unset "STACK_SLICES[$name]"
+    if [[ "$name" == "$CUR_STACK_NAME" ]]; then
+        CUR_STACK_NAME=""
+        br_log_info "Removed current stack '%s'. No current stack. Use /stack use or /stack new, otherwise issues might happen." "$name"
+    else
+        br_log_info "Removed stack '%s'." "$name"
+    fi
+}
+
+# Dump stack between [STACK]...[/STACK] tags, each slice between [SLICE]...[/SLICE] tags
+br_stack_dump() {
+    local name
+    if [[ -z "$1" ]]; then
+        name="$CUR_STACK_NAME"
+    else
+        name=$(get_stack_name "$1") || { br_log_error "Stack '%s' does not exist." "$1"; return 1; }
+    fi
+    if [[ -z "$name" ]]; then
+        br_log_error "No current stack."; return 1
+    fi
+    if [[ -z "${STACKS[$name]+x}" ]]; then
+        br_log_error "Stack '%s' does not exist." "$name"; return 1
+    fi
+    echo "${COLOR_DIM}[STACK]${COLOR_RESET}"
+    echo "name: $name"
+    echo "id: ${STACKS[$name]}"
+    echo "datetime: ${STACK_DTS[$name]:-N/A}"
+    local slices_json="${STACK_SLICES[$name]:-[]}"
+    local slice_count
+    slice_count=$(printf '%s' "$slices_json" | jq 'length')
+    for ((i=0; i<slice_count; i++)); do
+        echo "${COLOR_DIM}[SLICE]${COLOR_RESET}"
+        printf '%s' "$slices_json" | jq -c ".[$i]" | jq $JQ_COLOR_FLAG .
+        echo "${COLOR_DIM}[/SLICE]${COLOR_RESET}"
+    done
+    echo "${COLOR_DIM}[/STACK]${COLOR_RESET}"
+}
+
+# Print all stacks and their slices as an ASCII tree
+br_stack_tree() {
+    if [[ ${#STACKS[@]} -eq 0 ]]; then
+        br_log_info "No stacks."
+        return 0
+    fi
+    local -a stack_names
+    mapfile -t stack_names < <(printf '%s\n' "${!STACKS[@]}" | sort)
+
+    local stotal=${#stack_names[@]}
+    local si=0
+    for sname in "${stack_names[@]}"; do
+        ((si++))
+        local is_last=$(( si == stotal ))
+
+        local s_prefix s_child_prefix
+        if [[ "$is_last" == "1" ]]; then
+            s_prefix="└── "
+            s_child_prefix="    "
+        else
+            s_prefix="├── "
+            s_child_prefix="│   "
+        fi
+
+        local s_marker=""
+        [[ "$sname" == "$CUR_STACK_NAME" ]] && s_marker="* "
+
+        # Print name before id
+        local s_line="${s_prefix}${s_marker}name=\"${sname}\" id=${STACKS[$sname]} datetime=\"${STACK_DTS[$sname]:-N/A}\""
+
+        if [[ "$USE_COLOR" == "true" && "$sname" == "$CUR_STACK_NAME" ]]; then
+            printf "%s%s%s\n" "$COLOR_GREEN" "$s_line" "$COLOR_RESET"
+        else
+            printf "%s\n" "$s_line"
+        fi
+
+        local slice_count
+        slice_count=$(count_slices_in_stack "$sname")
+        for ((i=0; i<slice_count; i++)); do
+            local is_last_slice=$(( i == slice_count - 1 ))
+            local slice_prefix
+            if [[ "$is_last_slice" == "1" ]]; then
+                slice_prefix="${s_child_prefix}└── "
+            else
+                slice_prefix="${s_child_prefix}├── "
+            fi
+            local msg_count
+            msg_count=$(printf '%s' "${STACK_SLICES[$sname]}" | jq -r ".[$i] | length")
+            printf "%sslice[%d] (%s message(s))\n" "$slice_prefix" "$i" "$msg_count"
+        done
+    done
+}
+
+# Peek/Pop argument parsing
+# Sets globals: PP_TARGET (stack name or ""), PP_RANGE (b e or ""), PP_HAS_RANGE
+parse_peek_pop_arg() {
+    PP_TARGET=""
+    PP_RANGE=""
+    PP_HAS_RANGE=false
+
+    local args=("$@")
+    local arg1="${args[0]:-}"
+    local arg2="${args[1]:-}"
+
+    # Check if arg2 is a range, if so, arg1 is target
+    if [[ "$arg2" =~ ^\[(-?[0-9]+)([:,])(-?[0-9]+)\]$ ]]; then
+        PP_TARGET="$arg1"
+        PP_RANGE="${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
+        PP_HAS_RANGE=true
+        return 0
+    fi
+
+    # Check if arg1 contains target + range (e.g. s1[0:-2])
+    if [[ "$arg1" =~ ^([^\[]+)\[(-?[0-9]+)([:,])(-?[0-9]+)\]$ ]]; then
+        PP_TARGET="${BASH_REMATCH[1]}"
+        PP_RANGE="${BASH_REMATCH[2]} ${BASH_REMATCH[4]}"
+        PP_HAS_RANGE=true
+        return 0
+    fi
+
+    # Just a range (e.g. [0:-2])
+    if [[ "$arg1" =~ ^\[(-?[0-9]+)([:,])(-?[0-9]+)\]$ ]]; then
+        PP_RANGE="${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
+        PP_HAS_RANGE=true
+        return 0
+    fi
+
+    # Just a name
+    if [[ -n "$arg1" ]]; then
+        PP_TARGET="$arg1"
+    fi
+    return 0
+}
+
+# Resolve Python-style slice indices to absolute indices
+# Args: b e length. Outputs: resolved_b resolved_e (clamped to [0, len])
+resolve_slice_indices() {
+    local b="$1" e="$2" len="$3"
+    if [[ "$b" -lt 0 ]]; then b=$((len + b)); fi
+    if [[ "$e" -lt 0 ]]; then e=$((len + e)); fi
+    [[ "$b" -lt 0 ]] && b=0
+    [[ "$b" -gt "$len" ]] && b=$len
+    [[ "$e" -lt 0 ]] && e=0
+    [[ "$e" -gt "$len" ]] && e=$len
+    echo "$b $e"
+}
+
+# Peek at messages from current conversation (read-only)
+# Variants: /conv peek, /conv peek [b:e], /conv peek <dst>, /conv peek <dst>[b:e]
+br_conv_peek() {
+    if ! br_check_current; then return 1; fi
+    br_sync_msgs
+
+    parse_peek_pop_arg "$@"
+    local target="$PP_TARGET"
+    local has_range="$PP_HAS_RANGE"
+    local range_b range_e
+    if [[ "$has_range" == "true" ]]; then
+        read -r range_b range_e <<< "$PP_RANGE"
+    fi
+
+    local total=${#CONVERSATION[@]}
+    if [[ "$total" -eq 0 ]]; then
+        br_log_info "Conversation is empty."
+        return 0
+    fi
+
+    local msgs_json
+    msgs_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
+
+    local slice_json
+    if [[ "$has_range" == "true" ]]; then
+        local b e
+        read -r b e <<< "$(resolve_slice_indices "$range_b" "$range_e" "$total")"
+        slice_json=$(printf '%s' "$msgs_json" | jq -c --argjson b "$b" --argjson e "$e" '.[$b:$e]')
+    else
+        slice_json=$(printf '%s' "$msgs_json" | jq -c '.[-1:]')
+    fi
+
+    echo "${COLOR_DIM}[PEEK]${COLOR_RESET}"
+    if [[ -n "$target" ]]; then
+        echo "${COLOR_DIM}  (would push to stack: $target)${COLOR_RESET}"
+    fi
+    echo "${COLOR_DIM}[SLICE]${COLOR_RESET}"
+    printf '%s' "$slice_json" | jq $JQ_COLOR_FLAG .
+    echo "${COLOR_DIM}[/SLICE]${COLOR_RESET}"
+    echo "${COLOR_DIM}[/PEEK]${COLOR_RESET}"
+}
+
+# Peek at slices from current or specified stack (read-only)
+# Variants: /stack peek, /stack peek [b:e], /stack peek <src>, /stack peek <src>[b:e]
+br_stack_peek() {
+    parse_peek_pop_arg "$@"
+    local target="$PP_TARGET"
+    local has_range="$PP_HAS_RANGE"
+    local range_b range_e
+    if [[ "$has_range" == "true" ]]; then
+        read -r range_b range_e <<< "$PP_RANGE"
+    fi
+
+    local stack_name
+    if [[ -n "$target" ]]; then
+        stack_name=$(get_stack_name "$target") || { br_log_error "Stack '%s' does not exist." "$target"; return 1; }
+    else
+        if ! br_check_current_stack; then return 1; fi
+        stack_name="$CUR_STACK_NAME"
+    fi
+
+    local slices_json="${STACK_SLICES[$stack_name]:-[]}"
+    local slice_count
+    slice_count=$(printf '%s' "$slices_json" | jq 'length')
+
+    if [[ "$slice_count" -eq 0 ]]; then
+        br_log_info "Stack '%s' is empty." "$stack_name"
+        return 0
+    fi
+
+    local popped_json
+    if [[ "$has_range" == "true" ]]; then
+        local b e
+        read -r b e <<< "$(resolve_slice_indices "$range_b" "$range_e" "$slice_count")"
+        popped_json=$(printf '%s' "$slices_json" | jq -c --argjson b "$b" --argjson e "$e" '.[$b:$e]')
+    else
+        popped_json=$(printf '%s' "$slices_json" | jq -c '.[-1:]')
+    fi
+
+    echo "${COLOR_DIM}[PEEK]${COLOR_RESET}"
+    echo "${COLOR_DIM}  (stack: $stack_name)${COLOR_RESET}"
+
+    local count
+    count=$(printf '%s' "$popped_json" | jq 'length')
+    for ((i=0; i<count; i++)); do
+        echo "${COLOR_DIM}[SLICE]${COLOR_RESET}"
+        printf '%s' "$popped_json" | jq -c ".[$i]" | jq $JQ_COLOR_FLAG .
+        echo "${COLOR_DIM}[/SLICE]${COLOR_RESET}"
+    done
+
+    echo "${COLOR_DIM}[/PEEK]${COLOR_RESET}"
+}
+
+# Pop messages from current conversation and push as slice to stack
+# Variants: /conv pop, /conv pop [b:e], /conv pop <dst>, /conv pop <dst>[b:e]
+br_conv_pop() {
+    if ! br_check_current; then return 1; fi
+    br_sync_msgs
+
+    parse_peek_pop_arg "$@"
+    local target="$PP_TARGET"
+    local has_range="$PP_HAS_RANGE"
+    local range_b range_e
+    if [[ "$has_range" == "true" ]]; then
+        read -r range_b range_e <<< "$PP_RANGE"
+    fi
+
+    local dst_stack
+    if [[ -n "$target" ]]; then
+        dst_stack=$(get_stack_name "$target") || { br_log_error "Stack '%s' does not exist." "$target"; return 1; }
+    else
+        if ! br_check_current_stack; then return 1; fi
+        dst_stack="$CUR_STACK_NAME"
+    fi
+
+    local total=${#CONVERSATION[@]}
+    if [[ "$total" -eq 0 ]]; then
+        br_log_info "Conversation is empty."
+        return 0
+    fi
+
+    local msgs_json
+    msgs_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
+
+    local slice_json
+    if [[ "$has_range" == "true" ]]; then
+        local b e
+        read -r b e <<< "$(resolve_slice_indices "$range_b" "$range_e" "$total")"
+        if [[ "$b" -ge "$e" ]]; then
+            br_log_info "Empty range [%s:%s] resolved to [%s:%s]. Nothing to pop." "$range_b" "$range_e" "$b" "$e"
+            return 0
+        fi
+        slice_json=$(printf '%s' "$msgs_json" | jq -c --argjson b "$b" --argjson e "$e" '.[$b:$e]')
+        # Remove popped messages from conversation
+        local remaining_json
+        remaining_json=$(printf '%s' "$msgs_json" | jq -c --argjson b "$b" --argjson e "$e" '.[0:$b] + .[$e:]')
+        CONVERSATION=()
+        local remaining_count
+        remaining_count=$(printf '%s' "$remaining_json" | jq 'length')
+        for ((i=0; i<remaining_count; i++)); do
+            CONVERSATION+=("$(printf '%s' "$remaining_json" | jq -c ".[$i]")")
+        done
+    else
+        # Pop last message
+        slice_json=$(printf '%s' "$msgs_json" | jq -c '.[-1:]')
+        unset 'CONVERSATION[-1]'
+    fi
+
+    br_sync_msgs
+
+    # Push slice to top of destination stack
+    STACK_SLICES[$dst_stack]=$(printf '%s' "${STACK_SLICES[$dst_stack]:-[]}" | jq -c --argjson slice "$slice_json" '. + [$slice]')
+
+    local slice_len
+    slice_len=$(printf '%s' "$slice_json" | jq 'length')
+    br_log_info "Popped %d message(s) from conversation, pushed as slice to stack '%s'." "$slice_len" "$dst_stack"
+
+    echo "${COLOR_DIM}[SLICE]${COLOR_RESET}"
+    printf '%s' "$slice_json" | jq $JQ_COLOR_FLAG .
+    echo "${COLOR_DIM}[/SLICE]${COLOR_RESET}"
+}
+
+# Pop slices from stack and push to conversation or another stack
+# Variants: /stack pop, /stack pop [b:e], /stack pop <src>, /stack pop <src>[b:e], /stack pop <src> <dst>
+br_stack_pop() {
+    # Case: /stack pop <src> <dst> - pop last slice from src, push to dst stack
+    if [[ $# -eq 2 ]] && [[ "$1" != *"["* ]] && [[ "$2" != *"["* ]]; then
+        local src_name dst_name
+        src_name=$(get_stack_name "$1") || { br_log_error "Stack '%s' does not exist." "$1"; return 1; }
+        dst_name=$(get_stack_name "$2") || { br_log_error "Stack '%s' does not exist." "$2"; return 1; }
+
+        local slices_json="${STACK_SLICES[$src_name]:-[]}"
+        local slice_count
+        slice_count=$(printf '%s' "$slices_json" | jq 'length')
+
+        if [[ "$slice_count" -eq 0 ]]; then
+            br_log_info "Stack '%s' is empty." "$src_name"
+            return 0
+        fi
+
+        # Pop last slice from src
+        local slice_json
+        slice_json=$(printf '%s' "$slices_json" | jq -c '.[-1]')
+        STACK_SLICES[$src_name]=$(printf '%s' "$slices_json" | jq -c '.[0:-1]')
+        # Push to top of dst
+        STACK_SLICES[$dst_name]=$(printf '%s' "${STACK_SLICES[$dst_name]:-[]}" | jq -c --argjson slice "$slice_json" '. + [$slice]')
+
+        local slice_len
+        slice_len=$(printf '%s' "$slice_json" | jq 'length')
+        br_log_info "Popped slice (%d message(s)) from stack '%s', pushed to stack '%s'." "$slice_len" "$src_name" "$dst_name"
+
+        echo "${COLOR_DIM}[SLICE]${COLOR_RESET}"
+        printf '%s' "$slice_json" | jq $JQ_COLOR_FLAG .
+        echo "${COLOR_DIM}[/SLICE]${COLOR_RESET}"
+        return 0
+    fi
+
+    # Case: /stack pop, /stack pop [b:e], /stack pop <src>, /stack pop <src>[b:e], /stack pop <src> [b:e]
+    parse_peek_pop_arg "$@"
+    local target="$PP_TARGET"
+    local has_range="$PP_HAS_RANGE"
+    local range_b range_e
+    if [[ "$has_range" == "true" ]]; then
+        read -r range_b range_e <<< "$PP_RANGE"
+    fi
+
+    local src_stack
+    if [[ -n "$target" ]]; then
+        src_stack=$(get_stack_name "$target") || { br_log_error "Stack '%s' does not exist." "$target"; return 1; }
+    else
+        if ! br_check_current_stack; then return 1; fi
+        src_stack="$CUR_STACK_NAME"
+    fi
+
+    if ! br_check_current; then return 1; fi
+    br_sync_msgs
+
+    local slices_json="${STACK_SLICES[$src_stack]:-[]}"
+    local slice_count
+    slice_count=$(printf '%s' "$slices_json" | jq 'length')
+
+    if [[ "$slice_count" -eq 0 ]]; then
+        br_log_info "Stack '%s' is empty." "$src_stack"
+        return 0
+    fi
+
+    local popped_json
+    if [[ "$has_range" == "true" ]]; then
+        local b e
+        read -r b e <<< "$(resolve_slice_indices "$range_b" "$range_e" "$slice_count")"
+        if [[ "$b" -ge "$e" ]]; then
+            br_log_info "Empty range [%s:%s] resolved to [%s:%s]. Nothing to pop." "$range_b" "$range_e" "$b" "$e"
+            return 0
+        fi
+        popped_json=$(printf '%s' "$slices_json" | jq -c --argjson b "$b" --argjson e "$e" '.[$b:$e]')
+        # Flatten all popped slices into single message array
+        local flat_json
+        flat_json=$(printf '%s' "$popped_json" | jq -c 'flatten')
+        # Remove popped slices from stack
+        STACK_SLICES[$src_stack]=$(printf '%s' "$slices_json" | jq -c --argjson b "$b" --argjson e "$e" '.[0:$b] + .[$e:]')
+        # Push messages to conversation in order
+        local msg_count
+        msg_count=$(printf '%s' "$flat_json" | jq 'length')
+        for ((i=0; i<msg_count; i++)); do
+            CONVERSATION+=("$(printf '%s' "$flat_json" | jq -c ".[$i]")")
+        done
+        br_sync_msgs
+
+        br_log_info "Popped %d slice(s) (%d message(s)) from stack '%s', pushed to conversation." "$((e - b))" "$msg_count" "$src_stack"
+        local pop_count
+        pop_count=$(printf '%s' "$popped_json" | jq 'length')
+        for ((i=0; i<pop_count; i++)); do
+            echo "${COLOR_DIM}[SLICE]${COLOR_RESET}"
+            printf '%s' "$popped_json" | jq -c ".[$i]" | jq $JQ_COLOR_FLAG .
+            echo "${COLOR_DIM}[/SLICE]${COLOR_RESET}"
+        done
+    else
+        # Pop last slice from stack
+        popped_json=$(printf '%s' "$slices_json" | jq -c '.[-1]')
+        STACK_SLICES[$src_stack]=$(printf '%s' "$slices_json" | jq -c '.[0:-1]')
+        # Push messages to conversation in order
+        local msg_count
+        msg_count=$(printf '%s' "$popped_json" | jq 'length')
+        for ((i=0; i<msg_count; i++)); do
+            CONVERSATION+=("$(printf '%s' "$popped_json" | jq -c ".[$i]")")
+        done
+        br_sync_msgs
+
+        br_log_info "Popped slice (%d message(s)) from stack '%s', pushed to conversation." "$msg_count" "$src_stack"
+        echo "${COLOR_DIM}[SLICE]${COLOR_RESET}"
+        printf '%s' "$popped_json" | jq $JQ_COLOR_FLAG .
+        echo "${COLOR_DIM}[/SLICE]${COLOR_RESET}"
+    fi
+}
+
 # Dispatchers
 
 br_handle_session_conv() {
@@ -1215,11 +1827,14 @@ br_handle_session_conv() {
         rm)     br_conv_rm "$@" ;;
         mv)     br_conv_mv "$@" ;;
         cp)     br_conv_cp "$@" ;;
-        resume) br_conv_resume "$@" ;;
+        use)    br_conv_use "$@" ;;
         save)   br_conv_save "$@" ;;
         load)   br_conv_load "$@" ;;
         clear)  br_conv_clear "$@" ;;
-        "")     br_log_info "Usage: /session conv <ls|new|rm|mv|cp|resume|save|load|clear> ..." ;;
+        dump)   br_conv_dump ;;
+        peek)   br_conv_peek "$@" ;;
+        pop)    br_conv_pop "$@" ;;
+        "")     br_log_info "Usage: /session conv <ls|new|rm|mv|cp|use|save|load|clear|dump|peek|pop> ..." ;;
         *)      br_log_error "Unknown /session conv sub-command: %s." "$sub" ;;
     esac
 }
@@ -1235,11 +1850,11 @@ br_handle_session() {
         rm)     br_session_rm "$@" ;;
         dump)   br_session_dump "$@" ;;
         tree)   br_session_tree "$@" ;;
-        resume) br_session_resume "$@" ;;
+        use)    br_session_use "$@" ;;
         save)   br_session_save "$@" ;;
         load)   br_session_load "$@" ;;
         conv)   br_handle_session_conv "$@" ;;
-        "")     br_log_info "Usage: /session <ls|new|clear|mv|cp|rm|dump|tree|resume|save|load|conv> ..." ;;
+        "")     br_log_info "Usage: /session <ls|new|clear|mv|cp|rm|dump|tree|use|save|load|conv> ..." ;;
         *)      br_log_error "Unknown /session sub-command: %s." "$sub" ;;
     esac
 }
@@ -1259,16 +1874,38 @@ br_handle_conv() {
         cp)
             if [[ $# -eq 1 || $# -eq 2 ]]; then br_conv_cp "$@"
             else br_log_error "Usage: /conv cp <new> | <old> <new>."; fi ;;
-        resume)
-            if [[ $# -eq 1 ]]; then br_conv_resume "$CUR_SESSION_NAME" "$1"
-            else br_log_error "Usage: /conv resume <name>."; fi ;;
+        use)
+            if [[ $# -eq 1 ]]; then br_conv_use "$CUR_SESSION_NAME" "$1"
+            else br_log_error "Usage: /conv use <name>."; fi ;;
         save)   br_conv_save "$@" ;;
         load)   br_conv_load "$@" ;;
         clear)
             if [[ $# -eq 0 ]]; then br_conv_clear
             else br_conv_clear "$CUR_SESSION_NAME" "$1"; fi ;;
-        "")     br_log_info "Usage: /conv <ls|new|rm|mv|cp|resume|save|load|clear> ..." ;;
+        dump)   br_conv_dump ;;
+        peek)   br_conv_peek "$@" ;;
+        pop)    br_conv_pop "$@" ;;
+        "")     br_log_info "Usage: /conv <ls|new|rm|mv|cp|use|save|load|clear|dump|peek|pop> ..." ;;
         *)      br_log_error "Unknown /conv sub-command: %s." "$sub" ;;
+    esac
+}
+
+br_handle_stack() {
+    local sub="$1"; shift || true
+    case "$sub" in
+        ls)     br_stack_ls "$@" ;;
+        new)    br_stack_new "$@" ;;
+        clear)  br_stack_clear "$@" ;;
+        mv)     br_stack_mv "$@" ;;
+        cp)     br_stack_cp "$@" ;;
+        use)    br_stack_use "$@" ;;
+        rm)     br_stack_rm "$@" ;;
+        dump)   br_stack_dump "$@" ;;
+        tree)   br_stack_tree "$@" ;;
+        peek)   br_stack_peek "$@" ;;
+        pop)    br_stack_pop "$@" ;;
+        "")     br_log_info "Usage: /stack <ls|new|clear|mv|cp|use|rm|dump|tree|peek|pop> ..." ;;
+        *)      br_log_error "Unknown /stack sub-command: %s." "$sub" ;;
     esac
 }
 
@@ -1644,7 +2281,7 @@ oai_make_request() {
     # Ensure valid session/conversation before sending
     br_update_headers
     if [[ -z "$SESSION_AFFINITY" || -z "$CONVERSATION_ID" ]]; then
-        br_log_error "No active session/conversation. Use /session conv new or /session conv resume."
+        br_log_error "No active session/conversation. Use /session conv new or /session conv use."
         return 1
     fi
 
@@ -1965,28 +2602,29 @@ append_input_history() {
 
 # Main
 main() {
-    # Auto-create initial session + conversation
-    local init_sid init_sname init_cid init_cname
+    # Auto-create initial session + conversation with default name "main"
+    local init_sid init_cid init_dt
     init_sid=$(gen_uuid)
-    init_sname="${init_sid: -12}"
     init_cid=$(gen_uuid)
-    init_cname="${init_cid: -12}"
-
-    # Fallback for rare collisions
-    while [[ -n "${SESSIONS[$init_sname]+x}" ]]; do init_sname="${init_sname}_1"; done
-    while [[ -n "${CONVS["$init_sname|$init_cname"]+x}" ]]; do init_cname="${init_cname}_1"; done
-
-    local init_dt
     init_dt=$(get_utc_datetime)
-    SESSIONS["$init_sname"]="$init_sid"
-    SESSION_DTS["$init_sname"]="$init_dt"
-    CONVS["$init_sname|$init_cname"]="$init_cid"
-    MSGS["$init_sname|$init_cname"]="[]"
-    CONV_DTS["$init_sname|$init_cname"]="$init_dt"
 
-    CUR_SESSION_NAME="$init_sname"
-    CUR_CONV_NAME="$init_cname"
+    SESSIONS["main"]="$init_sid"
+    SESSION_DTS["main"]="$init_dt"
+    CONVS["main|main"]="$init_cid"
+    MSGS["main|main"]="[]"
+    CONV_DTS["main|main"]="$init_dt"
+
+    CUR_SESSION_NAME="main"
+    CUR_CONV_NAME="main"
     br_update_headers
+
+    # Create default stack "main"
+    local init_stack_id
+    init_stack_id=$(gen_uuid)
+    STACKS["main"]="$init_stack_id"
+    STACK_DTS["main"]="$init_dt"
+    STACK_SLICES["main"]="[]"
+    CUR_STACK_NAME="main"
 
     read_env_vars
     init_conversation
@@ -2036,30 +2674,60 @@ main() {
         if [[ "$message" == "/help" ]]; then
             cat <<EOF
  ${COLOR_DIM}General:${COLOR_RESET}
-  /info              Print config and current session/conversation info
-  /dump              Print current conversation messages as JSON
-  /pop               Pop last message from current conversation
-  /compact           Summarize and compact current conversation
-  /history           Show input history
-  /history clear     Clear input history
-  /exit, /quit       Exit
+  /info                             Print config and current session/conversation/stack info
+  /dump                             Print current conversation messages as JSON
+                                    between [CONVERSATION]...[/CONVERSATION] tags
+                                    (same as /conv dump)
+  /peek                             Peek at last message from current conversation
+                                    as a slice of messages (read-only). Shows
+                                    where the slice would be pushed if popped.
+                                    (same as /conv peek)
+  /peek [b:e]                       Peek at messages from index b to e from
+                                    current conversation as a slice (read-only).
+                                    (same as /conv peek [b:e])
+  /peek <dst>                       Peek at last message from current conversation
+                                    as a slice (read-only). Shows dst as where
+                                    the slice would be pushed if popped.
+                                    (same as /conv peek <dst>)
+  /peek <dst>[b:e]                  Peek at messages from index b to e from
+                                    current conversation as a slice (read-only).
+                                    Shows dst as where the slice would be pushed.
+                                    (same as /conv peek <dst>[b:e])
+  /pop                              Pop last message from current conversation
+                                    as a slice and push to current stack.
+                                    (same as /conv pop)
+  /pop [b:e]                        Pop messages from index b to e from current
+                                    conversation as a slice and push to current
+                                    stack.
+                                    (same as /conv pop [b:e])
+  /pop <dst>                        Pop last message from current conversation
+                                    as a slice and push to stack <dst>.
+                                    (same as /conv pop <dst>)
+  /pop <dst>[b:e]                   Pop messages from index b to e from current
+                                    conversation as a slice and push to stack
+                                    <dst>.
+                                    (same as /conv pop <dst>[b:e])
+  /compact                          Summarize and compact current conversation
+  /history                          Show input history
+  /history clear                    Clear input history
+  /exit, /quit                      Exit
 
  ${COLOR_DIM}Session (/session ...):${COLOR_RESET}
-  /session ls                          List all sessions
-  /session new [name]                  Create new session, switch to it
-  /session clear [id-or-name]          Remove all conversations in session (default: current)
-  /session mv <new>                    Rename current session to <new>
-  /session mv <old> <new>              Rename session <old> (id-or-name) to <new>
-  /session cp <new>                    Copy current session to <new>
-  /session cp <old> <new>              Copy session <old> (id-or-name) to <new>
-  /session rm [id-or-name]             Remove session (current if no name)
-  /session dump [id-or-name]           Dump session as pretty JSON
-  /session tree                        Show sessions and conversations as a tree
-  /session resume <id-or-name>         Switch to session
-  /session save <file>                 Save all sessions to file
-  /session save <id-or-name> <file>    Save single session to file
-  /session load <file>                 Load all sessions from file (merge)
-  /session load <file> <name>          Load single session into <name>
+  /session ls                       List all sessions
+  /session new [name]               Create new session, switch to it
+  /session clear [id-or-name]       Remove all conversations in session (default: current)
+  /session mv <new>                 Rename current session to <new>
+  /session mv <old> <new>           Rename session <old> (id-or-name) to <new>
+  /session cp <new>                 Copy current session to <new>
+  /session cp <old> <new>           Copy session <old> (id-or-name) to <new>
+  /session rm [id-or-name]          Remove session (current if no name)
+  /session dump [id-or-name]        Dump session as JSON between [SESSION]...[/SESSION] tags
+  /session tree                     Show sessions and conversations as a tree
+  /session use <id-or-name>         Switch to session
+  /session save <file>              Save all sessions to file
+  /session save <id-or-name> <file> Save single session to file
+  /session load <file>              Load all sessions from file (merge)
+  /session load <file> <name>       Load single session into <name>
 
  ${COLOR_DIM}Conversations (/session conv ...):${COLOR_RESET}
   /session conv ls                              List conversations in current session
@@ -2072,12 +2740,16 @@ main() {
   /session conv cp <new>                        Copy current conversation
   /session conv cp <old> <new>                  Copy conversation in current session
   /session conv cp <s1> <c1> <s2> <c2>          Copy conversation across sessions
-  /session conv resume <conv>                   Resume conversation in current session
-  /session conv resume <sess> <conv>            Resume conversation in session <sess>
+  /session conv use <conv>                      Use conversation in current session
+  /session conv use <sess> <conv>               Use conversation in session <sess>
   /session conv save <file>                     Save all convs of current session
   /session conv save <conv> <file>              Save single conversation
   /session conv load <file>                     Load convs into current session (merge)
   /session conv load <file> <conv>              Load single conv into <conv>
+  /session conv dump                            Print current conversation messages as JSON
+                                                between [CONVERSATION]...[/CONVERSATION] tags
+  /session conv peek [dst][b:e]                 Peek at messages from current conversation
+  /session conv pop [dst][b:e]                  Pop messages from current conversation to stack
 
  ${COLOR_DIM}Conversations in current session (/conv ...):${COLOR_RESET}
   /conv ls                          List conversations in current session
@@ -2088,11 +2760,63 @@ main() {
   /conv mv <old> <new>              Rename conversation
   /conv cp <new>                    Copy current conversation
   /conv cp <old> <new>              Copy conversation
-  /conv resume <name>               Resume conversation
+  /conv use <name>                  Use conversation
   /conv save <file>                 Save all convs of current session
   /conv save <conv> <file>          Save single conversation
   /conv load <file>                 Load convs into current session (merge)
   /conv load <file> <conv>          Load single conv into <conv>
+  /conv dump                        Print current conversation messages as JSON
+                                    between [CONVERSATION]...[/CONVERSATION] tags
+  /conv peek                        Peek at last message from current conversation
+                                    as a slice of messages (read-only)
+  /conv peek [b:e]                  Peek at messages from index b to e from
+                                    current conversation as a slice (read-only)
+  /conv peek <dst>                  Peek at last message from current conversation
+                                    as a slice (read-only). Shows dst as where
+                                    the slice would be pushed if popped
+  /conv peek <dst>[b:e]             Peek at messages from index b to e from
+                                    current conversation as a slice (read-only).
+                                    Shows dst as where the slice would be pushed
+  /conv pop                         Pop last message from current conversation
+                                    as a slice and push to current stack
+  /conv pop [b:e]                   Pop messages from index b to e from current
+                                    conversation as a slice and push to current
+                                    stack
+  /conv pop <dst>                   Pop last message from current conversation
+                                    as a slice and push to stack <dst>
+  /conv pop <dst>[b:e]              Pop messages from index b to e from current
+                                    conversation as a slice and push to stack
+                                    <dst>
+
+ ${COLOR_DIM}Stacks (/stack ...):${COLOR_RESET}
+  /stack ls                         List all stacks
+  /stack new [name]                 Create new stack, switch to it
+  /stack clear [name]               Clear all slices in stack (default: main)
+  /stack mv <old> <new>             Rename stack <old> to <new>
+  /stack cp <old> <new>             Copy stack <old> to <new>
+  /stack use <id-or-name>           Switch to stack
+  /stack rm [id-or-name]            Remove stack (current if no name)
+  /stack dump [id-or-name]          Dump stack content between [STACK]...[/STACK] tags
+                                    with each slice between [SLICE]...[/SLICE] tags
+  /stack tree                       Show all stacks and their slices as a tree
+  /stack peek                       Peek at last slice from current stack
+                                    (read-only, log to console)
+  /stack peek [b:e]                 Peek at slices from index b to e from
+                                    current stack (read-only)
+  /stack peek <src>                 Peek at last slice from stack <src>
+                                    (read-only)
+  /stack peek <src>[b:e]            Peek at slices from index b to e from
+                                    stack <src> (read-only)
+  /stack pop                        Pop last slice from current stack and push
+                                    to current conversation
+  /stack pop [b:e]                  Pop slices from index b to e from current
+                                    stack and push to current conversation
+  /stack pop <src>                  Pop last slice from stack <src> and push
+                                    to current conversation
+  /stack pop <src> [b:e]            Pop slices from index b to e from stack
+                                    <src> and push to current conversation
+  /stack pop <src> <dst>            Pop last slice from stack <src> and push
+                                    to top of stack <dst>
 
  ${COLOR_DIM}Shorthands for current session convs:${COLOR_RESET}
   /ls                               Shorthand for /conv ls
@@ -2103,11 +2827,17 @@ main() {
   /mv <old> <new>                   Shorthand for /conv mv <old> <new>
   /cp <new>                         Shorthand for /conv cp <new>
   /cp <old> <new>                   Shorthand for /conv cp <old> <new>
-  /resume <name>                    Shorthand for /conv resume <name>
+  /use <name>                       Shorthand for /conv use <name>
   /save <file>                      Shorthand for /conv save <file>
   /save <conv> <file>               Shorthand for /conv save <conv> <file>
   /load <file>                      Shorthand for /conv load <file>
   /load <file> <conv>               Shorthand for /conv load <file> <conv>
+  /peek [dst][b:e]                  Shorthand for /conv peek [dst][b:e]
+  /pop [dst][b:e]                   Shorthand for /conv pop [dst][b:e]
+
+ ${COLOR_DIM}Slice Range Syntax:${COLOR_RESET}
+  [b:e] or [b,e]    Python-style slice indices (negative indices supported)
+  Examples: [0:-2], [-3:-1], [1:3]
 
  ${COLOR_DIM}Tool Call Approval:${COLOR_RESET}
   Tool calls require approval by default. Press 'y' to allow, anything else to deny.
@@ -2116,33 +2846,9 @@ EOF
             continue
         fi
 
-        # /dump - check session/conversation exists
+        # /dump - shorthand for /conv dump
         if [[ "$message" == "/dump" ]]; then
-            if ! br_check_current; then continue; fi
-            local messages_json="[]"
-            if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
-                messages_json=$(printf '%s\n' "${CONVERSATION[@]}" | jq -s '.')
-            fi
-            echo "${COLOR_DIM}[CONVERSATION]${COLOR_RESET}"
-            printf '%s' "$messages_json" | jq $JQ_COLOR_FLAG .
-            echo "${COLOR_DIM}[/CONVERSATION]${COLOR_RESET}"
-            continue
-        fi
-
-        # /pop - check session/conversation exists
-        if [[ "$message" == "/pop" ]]; then
-            if ! br_check_current; then continue; fi
-            if [[ ${#CONVERSATION[@]} -gt 0 ]]; then
-                echo "${COLOR_DIM}[MESSAGE]${COLOR_RESET}"
-                printf '%s' "${CONVERSATION[-1]}" | jq $JQ_COLOR_FLAG .
-                echo "${COLOR_DIM}[/MESSAGE]${COLOR_RESET}"
-                unset 'CONVERSATION[-1]'
-                br_sync_msgs
-                br_log_info "Popped last message from conversation."
-            else
-                br_log_info "Conversation is empty."
-            fi
-            continue
+            br_conv_dump; continue
         fi
 
         # /compact - check session/conversation exists
@@ -2188,11 +2894,51 @@ EOF
             continue
         fi
 
+        # /stack ...
+        if [[ "$message" == "/stack" || "$message" == /stack\ * ]]; then
+            local rest="${message#/stack}"
+            rest="${rest# }"
+            local -a sargs
+            read -ra sargs <<< "$rest"
+            local sub="${sargs[0]:-}"
+            local -a sub_args=("${sargs[@]:1}")
+            br_handle_stack "$sub" "${sub_args[@]}"
+            continue
+        fi
+
+        # /peek ... (shorthand for /conv peek ...)
+        if [[ "$message" == "/peek" || "$message" == /peek\ * ]]; then
+            local rest="${message#/peek}"
+            rest="${rest# }"
+            local -a sargs
+            if [[ -n "$rest" ]]; then
+                read -ra sargs <<< "$rest"
+            else
+                sargs=()
+            fi
+            br_conv_peek "${sargs[@]}"
+            continue
+        fi
+
+        # /pop ... (shorthand for /conv pop ...)
+        if [[ "$message" == "/pop" || "$message" == /pop\ * ]]; then
+            local rest="${message#/pop}"
+            rest="${rest# }"
+            local -a sargs
+            if [[ -n "$rest" ]]; then
+                read -ra sargs <<< "$rest"
+            else
+                sargs=()
+            fi
+            br_conv_pop "${sargs[@]}"
+            continue
+        fi
+
         # Shorthand commands for /conv
         case "$message" in
-            /ls|/new|/clear|/rm|/mv|/cp|/resume|/save|/load|/ls\ *|/new\ *|/clear\ *|/rm\ *|/mv\ *|/cp\ *|/resume\ *|/save\ *|/load\ *)
+            /ls|/new|/clear|/rm|/mv|/cp|/use|/save|/load|/ls\ *|/new\ *|/clear\ *|/rm\ *|/mv\ *|/cp\ *|/use\ *|/save\ *|/load\ *)
                 local rest="${message#* }"
-                if [[ "$message" == /ls || "$message" == /new || "$message" == /clear || "$message" == /rm || "$message" == /mv || "$message" == /cp || "$message" == /resume || "$message" == /save || "$message" == /load ]]; then
+                if [[ "$message" == /ls || "$message" == /new || "$message" == /clear || "$message" == /rm || "$message" == /mv || "$message" == /cp || "$message" == /use || "$message" == /save || "$message" == /load ]]; then
                     rest=""
                 fi
                 local cmd="${message%% *}"
@@ -2203,7 +2949,7 @@ EOF
                     /rm) sub="rm" ;;
                     /mv) sub="mv" ;;
                     /cp) sub="cp" ;;
-                    /resume) sub="resume" ;;
+                    /use) sub="use" ;;
                     /save) sub="save" ;;
                     /load) sub="load" ;;
                 esac
